@@ -175,11 +175,20 @@ The proto (`protos/`) proved the UX; it is now real code. Details in
   transforms the wrapper into the client model (layer-namespaced decision ids) and inlines
   `generator/stack.css` + `generator/stack-client.js` (ported from the proto; separate assets
   so single-PR pages are untouched — no class collisions).
-- **`stack.sh`** — mirrors `retrofit.sh` looped: per-layer reduce → ingest `gh pr diff` →
-  enrich, then compose → validate → render. A layer may instead point at a committed `spine`
-  (offline, no `gh`).
+- **`proof.sh stack <manifest>`** — folded into the main entry point as a subcommand (was a
+  separate `stack.sh`): per-layer reduce → ingest `gh pr diff` → enrich, then compose →
+  validate → render. A layer may instead point at a committed `spine` (offline, no `gh`).
 - **Sample** — `prototype/data/stack-sample.manifest.json` (2 committed reduced spines,
   offline) wired into `build.sh`. A real multi-layer chain still awaits the deferred skill.
+- **Stack tab on the normal PR page** — `renderV2Page` now optionally renders a "Stack" tab
+  (`generator/stack-tab.css` + `generator/stack-tab-client.js`, `#view-stack`-scoped `st-*`
+  ports of the standalone rail/peel widget, so nothing collides with the page's own `.dl`,
+  `.diff-file`, `pre.code`, etc.). `proof.sh stack` now writes both the standalone
+  `stack-<top>.html` *and* one `pr-<n>.html` per layer with the tab embedded and pinned to
+  that layer (`stackDefaultLayer`, set explicitly by the orchestrator — a spine's own baked-in
+  `pr.number` isn't guaranteed to match the manifest's label for it, seen firsthand in the
+  synthetic sample). Additive: a `renderV2Page` call with no `stack` field is unchanged
+  (verified byte-identical modulo the pre-existing empty-conditional blank-line pattern).
 
 **Deferred (next cut):** `/proof:retrofit-stack` (bidirectional chain resolver + per-PR
 retrofit → manifest); the net-composed `main…top` diff with line reconciliation; a CI workflow.

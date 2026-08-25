@@ -531,9 +531,28 @@ function renderDiffTabV2(diff, decisions, coverage) {
 }
 
 function renderV2Page(data, assets) {
-  const { pr = {}, decisions = [], coverage, diff } = data;
+  const { pr = {}, decisions = [], coverage, diff, stack } = data;
   PR = pr;
   const hasDiff = Array.isArray(diff) && diff.length > 0;
+  // A layer's own walkthrough optionally carries the full composed stack
+  // payload (see proof.sh's `stack` subcommand) so its page can show a Stack
+  // tab alongside its normal Decisions/Diff — additive, absent for a plain
+  // retrofit run with no `stack` field.
+  const stackLayers = (stack && stack.stack && stack.stack.layers) || [];
+  const hasStack = stackLayers.length > 0;
+  // stackDefaultLayer is set explicitly by the orchestrator (proof.sh knows
+  // which layer index this page is for); fall back to matching pr.number for
+  // hand-assembled data, since a layer's own baked-in pr.number isn't
+  // guaranteed to equal the manifest's label for it.
+  const inferredLayerIdx = hasStack
+    ? stackLayers.findIndex((L) => String(L.pr) === String(pr.number))
+    : -1;
+  const defaultLayer =
+    data.stackDefaultLayer != null
+      ? data.stackDefaultLayer
+      : inferredLayerIdx >= 0
+        ? inferredLayerIdx
+        : "net";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -543,6 +562,7 @@ function renderV2Page(data, assets) {
 <style>
 ${assets.css}
 </style>
+${hasStack ? `<style>\n${assets.stackTabCss}\n</style>` : ""}
 </head>
 <body>
 <div class="app">
@@ -556,9 +576,11 @@ ${assets.css}
   <nav class="tabbar">
     <button class="tab on" data-tab="decisions">Decisions <span class="cnt">${decisions.length}</span></button>
     ${hasDiff ? `<button class="tab" data-tab="diff">Diff <span class="cnt">${diff.length}</span></button>` : ""}
+    ${hasStack ? `<button class="tab" data-tab="stack">Stack <span class="cnt">${stackLayers.length}</span></button>` : ""}
   </nav>
   ${renderDecisionsTabV2(decisions, coverage)}
   ${hasDiff ? renderDiffTabV2(diff, decisions, coverage) : ""}
+  ${hasStack ? renderStackTabPanel(stack, false, defaultLayer, assets) : ""}
 </div>
 <script>
 (function () {
@@ -569,7 +591,7 @@ ${assets.css}
   });
 
   var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
-  var views = { decisions: document.getElementById("view-decisions"), diff: document.getElementById("view-diff") };
+  var views = { decisions: document.getElementById("view-decisions"), diff: document.getElementById("view-diff")${hasStack ? ', stack: document.getElementById("view-stack")' : ""} };
   tabs.forEach(function (t) {
     t.addEventListener("click", function () {
       tabs.forEach(function (x) { x.classList.toggle("on", x === t); });
@@ -670,6 +692,36 @@ function stackRenderModel(data) {
   return { LAYERS, DECISIONS, FILES, seams: data.seams || {}, epic: (data.stack && data.stack.epic) || null };
 }
 
+// Stack tab — the same stackRenderModel folded into the normal PR page as an
+// extra tab (see renderV2Page) instead of a standalone artifact. defaultLayer
+// pre-selects the rail entry matching the page's own PR, so opening any
+// layer's own walkthrough opens the tab peeled to itself, not to "net".
+function renderStackTabPanel(stackPayload, active, defaultLayer, assets) {
+  const model = stackRenderModel(stackPayload);
+  const json = JSON.stringify(model).replace(/</g, "\\u003c");
+  const defaultLayerJson = JSON.stringify(defaultLayer == null ? "net" : String(defaultLayer));
+  return `<div class="tabview stacktab${active ? " on" : ""}" id="view-stack">
+    <div class="st-peelbar">
+      <span class="st-peelbar-lbl">Peel</span>
+      <span class="st-summary" id="st-summary"></span>
+      <span class="st-peel-state" id="st-peel-state"></span>
+      <label class="st-peel-mode"><input type="checkbox" id="st-peel-cumulative"> cumulative (through selected layer)</label>
+    </div>
+    <div class="st-grid">
+      <nav class="st-rail" id="st-rail"></nav>
+      <main class="st-diffcol" id="st-diffcol"></main>
+      <aside class="st-why" id="st-why"></aside>
+    </div>
+  </div>
+  <script>
+  var STACK_DATA=${json};
+  var STACK_DEFAULT_LAYER=${defaultLayerJson};
+  </script>
+  <script>
+  ${assets.stackTabClient}
+  </script>`;
+}
+
 function renderStackPage(data, assets) {
   const stack = data.stack || {};
   const repo = stack.repo || "";
@@ -768,6 +820,8 @@ function loadAssets() {
     client: g("client.js").replace(/\n$/, ""),
     stackCss: g("stack.css"),
     stackClient: g("stack-client.js").replace(/\n$/, ""),
+    stackTabCss: g("stack-tab.css"),
+    stackTabClient: g("stack-tab-client.js").replace(/\n$/, ""),
     templates: {
       page: g("templates", "page.ejs"),
       decisionCard: g("templates", "decision-card.ejs"),
