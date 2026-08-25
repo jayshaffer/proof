@@ -1,0 +1,228 @@
+:root {
+  --ground:#f6f7f9; --surface:#fff; --surface-2:#eef0f4;
+  --ink:#1a1f27; --ink-2:#4a5361; --ink-3:#7a8494;
+  --line:#e0e4ea; --line-2:#c9d0db;
+  --accent:#5b5bd6; --accent-soft:#ecebfb; --accent-ink:#3d3aa8;
+  --good:#158a5a; --good-soft:#e4f4ec; --bad:#c0392b; --bad-soft:#fbe9e7;
+  --add-bg:#e9f6ef;
+  --shadow:0 1px 2px rgba(16,22,32,.05),0 8px 24px rgba(16,22,32,.07);
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --l0:#0e7c86; --l0-soft:#dcf1f2; --l1:#5b5bd6; --l1-soft:#ecebfb;
+  --l2:#1f8f4e; --l2-soft:#e2f3e9; --l3:#c77700; --l3-soft:#f8ecd7;
+  --l4:#b0479b; --l4-soft:#f6e6f2;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#0e1115; --surface:#161a20; --surface-2:#1e232b;
+  --ink:#e8ecf2; --ink-2:#aab3c0; --ink-3:#717d8c;
+  --line:#262c35; --line-2:#333b46;
+  --accent:#a5a3f5; --accent-soft:#23233a; --accent-ink:#c9c8fb;
+  --good:#4bc48a; --good-soft:#14261d; --bad:#e8776a; --bad-soft:#2c1614;
+  --add-bg:#13241b;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 28px rgba(0,0,0,.4);
+  --l0:#46b6bf; --l0-soft:#12292b; --l1:#a5a3f5; --l1-soft:#23233a;
+  --l2:#4bc48a; --l2-soft:#14261d; --l3:#e0a252; --l3-soft:#2a2113;
+  --l4:#dd8fce; --l4-soft:#2b1526;
+}}
+:root[data-theme="dark"]{
+  --ground:#0e1115; --surface:#161a20; --surface-2:#1e232b;
+  --ink:#e8ecf2; --ink-2:#aab3c0; --ink-3:#717d8c;
+  --line:#262c35; --line-2:#333b46;
+  --accent:#a5a3f5; --accent-soft:#23233a; --accent-ink:#c9c8fb;
+  --good:#4bc48a; --good-soft:#14261d; --bad:#e8776a; --bad-soft:#2c1614;
+  --add-bg:#13241b;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 28px rgba(0,0,0,.4);
+  --l0:#46b6bf; --l0-soft:#12292b; --l1:#a5a3f5; --l1-soft:#23233a;
+  --l2:#4bc48a; --l2-soft:#14261d; --l3:#e0a252; --l3-soft:#2a2113;
+  --l4:#dd8fce; --l4-soft:#2b1526;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.app{height:100vh;display:grid;grid-template-rows:auto auto 1fr}
+
+.topbar{display:flex;align-items:baseline;gap:12px;padding:14px 22px;background:var(--ground);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.brand-num{font-family:var(--mono);font-weight:600;color:var(--accent);font-size:13px}
+.brand-title{font-weight:640;font-size:15px}
+.brand-repo{color:var(--ink-3);font-family:var(--mono);font-size:12px}
+.brand-meta{color:var(--ink-3);font-size:12px}
+.brand-meta code{font-family:var(--mono)}
+.spacer{flex:1 1 auto}
+.theme-toggle{align-self:center;font:inherit;font-size:12px;background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line);border-radius:7px;padding:5px 10px;cursor:pointer}
+.proto-tag{align-self:center;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--l3);background:var(--l3-soft);border:1px dashed var(--l3);border-radius:5px;padding:2px 7px}
+
+.peelbar{display:flex;align-items:center;gap:10px;padding:9px 22px;background:var(--surface);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.peelbar-lbl{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.peel-state{font-size:12px;color:var(--ink-3);font-family:var(--mono)}
+.peel-mode{margin-left:auto;display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2)}
+.peel-mode input{accent-color:var(--accent)}
+
+.stack{display:grid;grid-template-columns:minmax(240px,290px) minmax(0,1fr) minmax(300px,360px);min-height:0;height:100%}
+
+.rail{border-right:1px solid var(--line);overflow-y:auto;padding:14px 12px;background:var(--surface)}
+.rail-h{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600;margin:2px 6px 10px}
+.lyr{display:block;width:100%;text-align:left;font:inherit;cursor:pointer;background:none;border:1px solid transparent;border-left:3px solid transparent;border-radius:9px;padding:10px 12px;margin-bottom:4px}
+.lyr:hover{background:var(--surface-2)}
+.lyr.on{border-color:var(--line);background:var(--surface-2)}
+.lyr-top{display:flex;align-items:center;gap:8px}
+.lyr-pr{font-family:var(--mono);font-size:11px;font-weight:700;padding:1px 7px;border-radius:5px}
+.lyr-phase{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-3)}
+.lyr-title{font-size:12.5px;font-weight:550;line-height:1.35;color:var(--ink-2);margin:6px 0 7px}
+.lyr.on .lyr-title{color:var(--ink)}
+.lyr-stats{display:flex;gap:9px;align-items:center;font-size:11px;color:var(--ink-3);font-family:var(--mono)}
+.lyr-stats .adds{color:var(--good)} .lyr-stats .dels{color:var(--bad)}
+.lyr-foot{display:flex;align-items:center;gap:6px;margin-top:7px;flex-wrap:wrap}
+.prov{font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--l3);background:var(--l3-soft);border-radius:4px;padding:1px 6px}
+.dcount{font-size:10.5px;color:var(--ink-3)}
+.edge-note{font-size:10.5px;color:var(--ink-3);margin-top:6px;line-height:1.4}
+.edge-note b{color:var(--ink-2);font-weight:600}
+.lyr[data-layer="net"]{border-left-color:var(--ink-3)} .lyr[data-layer="net"] .lyr-pr{background:var(--surface-2);color:var(--ink-2)}
+.lyr[data-layer="0"]{border-left-color:var(--l0)} .lyr[data-layer="0"] .lyr-pr{background:var(--l0-soft);color:var(--l0)}
+.lyr[data-layer="1"]{border-left-color:var(--l1)} .lyr[data-layer="1"] .lyr-pr{background:var(--l1-soft);color:var(--l1)}
+.lyr[data-layer="2"]{border-left-color:var(--l2)} .lyr[data-layer="2"] .lyr-pr{background:var(--l2-soft);color:var(--l2)}
+.lyr[data-layer="3"]{border-left-color:var(--l3)} .lyr[data-layer="3"] .lyr-pr{background:var(--l3-soft);color:var(--l3)}
+.lyr[data-layer="4"]{border-left-color:var(--l4)} .lyr[data-layer="4"] .lyr-pr{background:var(--l4-soft);color:var(--l4)}
+
+.diffcol{overflow-y:auto;padding:16px 18px 60px}
+.lyr-section{margin-bottom:24px}
+.lyr-section[hidden]{display:none}
+/* the layer masthead is a colored band (masthead row + why), reading as the
+   whole layer's header — never mistakable for the first file card */
+.lyr-masthead{display:flex;align-items:center;gap:9px;padding:10px 14px;position:sticky;top:0;z-index:2;border-top:3px solid var(--line-2);border-radius:10px 10px 0 0;background:var(--surface-2)}
+.lyr-masthead .lyr-pr{font-family:var(--mono);font-size:11px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--surface);color:var(--ink-2)}
+.mh-phase{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3)}
+.mh-title{font-size:13px;font-weight:600;color:var(--ink)}
+.mh-stats{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.mh-stats .adds{color:var(--good)} .mh-stats .dels{color:var(--bad)}
+.lyr-section[data-layer="0"] .lyr-masthead{border-top-color:var(--l0);background:var(--l0-soft)} .lyr-section[data-layer="0"] .lyr-masthead .lyr-pr{color:var(--l0)}
+.lyr-section[data-layer="1"] .lyr-masthead{border-top-color:var(--l1);background:var(--l1-soft)} .lyr-section[data-layer="1"] .lyr-masthead .lyr-pr{color:var(--l1)}
+.lyr-section[data-layer="2"] .lyr-masthead{border-top-color:var(--l2);background:var(--l2-soft)} .lyr-section[data-layer="2"] .lyr-masthead .lyr-pr{color:var(--l2)}
+.lyr-section[data-layer="3"] .lyr-masthead{border-top-color:var(--l3);background:var(--l3-soft)} .lyr-section[data-layer="3"] .lyr-masthead .lyr-pr{color:var(--l3)}
+.lyr-section[data-layer="4"] .lyr-masthead{border-top-color:var(--l4);background:var(--l4-soft)} .lyr-section[data-layer="4"] .lyr-masthead .lyr-pr{color:var(--l4)}
+
+.lyr-why{margin:0;padding:4px 15px 14px;border-radius:0 0 10px 10px}
+.lyr-section[data-layer="0"] .lyr-why{background:var(--l0-soft)} .lyr-section[data-layer="1"] .lyr-why{background:var(--l1-soft)}
+.lyr-section[data-layer="2"] .lyr-why{background:var(--l2-soft)} .lyr-section[data-layer="3"] .lyr-why{background:var(--l3-soft)}
+.lyr-section[data-layer="4"] .lyr-why{background:var(--l4-soft)}
+.lyr-why-lbl{display:block;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:700;margin-bottom:5px}
+.lyr-why p{margin:0;font-size:13px;line-height:1.55;color:var(--ink-2);max-width:78ch}
+.lyr-why p code{font-family:var(--mono);font-size:.87em;background:color-mix(in srgb,var(--ink) 8%,transparent);padding:1px 5px;border-radius:4px}
+.lyr-why p.lyr-why-edge{margin-top:8px;font-size:12px;color:var(--ink-3)}
+.lyr-why p.lyr-why-edge b{color:var(--ink-2);font-weight:600}
+/* clear separator so files below never read as belonging to the why block */
+.lyr-files-div{display:flex;align-items:center;gap:10px;margin:15px 2px 10px;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:700}
+.lyr-files-div::after{content:"";flex:1 1 auto;height:1px;background:var(--line)}
+
+/* Jira status chip (shared by epic + layer ticket rows) */
+.jstatus{font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:2px 8px;border-radius:999px;background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line-2)}
+.jstatus.done{background:var(--good-soft);color:var(--good);border-color:color-mix(in srgb,var(--good) 30%,transparent)}
+.jstatus.prog{background:var(--accent-soft);color:var(--accent-ink);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+
+/* stack-level Epic banner at the top of the diff column */
+.epic{border:1px solid var(--line);border-top:3px solid var(--accent);border-radius:11px;background:var(--surface);padding:14px 16px;margin-bottom:22px;box-shadow:var(--shadow)}
+.epic-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:9px}
+.epic-badge{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-ink);background:var(--accent-soft);border-radius:5px;padding:2px 8px}
+.epic-key{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent);overflow-wrap:anywhere}
+.epic-sum{font-size:14px;font-weight:640;color:var(--ink)}
+.epic-goal{font-size:13px;line-height:1.55;color:var(--ink-2);margin:0 0 9px;max-width:82ch}
+.epic-goal code{font-family:var(--mono);font-size:.87em;background:var(--surface-2);padding:1px 5px;border-radius:4px}
+.epic-note{font-size:11.5px;line-height:1.5;color:var(--ink-3);margin:0 0 11px;font-style:italic;max-width:82ch}
+.req-chip{font-size:9.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line-2);border-radius:4px;padding:1px 6px}
+.epic-phases{display:flex;gap:6px;flex-wrap:wrap}
+.epic-phase{font-family:var(--mono);font-size:11px;color:var(--ink-3);border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+
+/* per-layer ticket identity + acceptance criteria inside the why band */
+.lyr-ticket{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:9px}
+.lyr-ticket .tk{font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--ink);text-decoration:none;border-bottom:1px dotted var(--ink-3)}
+.lyr-ticket .tsum{font-size:12.5px;color:var(--ink-2)}
+.lyr-ac{margin-top:11px;border-top:1px solid color-mix(in srgb,var(--ink) 9%,transparent);padding-top:9px}
+.lyr-ac summary{cursor:pointer;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:700;list-style:none}
+.lyr-ac summary::-webkit-details-marker{display:none}
+.lyr-ac summary::before{content:"▸ ";color:var(--ink-3)}
+.lyr-ac[open] summary::before{content:"▾ "}
+.lyr-ac ul{margin:9px 0 2px;padding-left:2px;list-style:none}
+.lyr-ac li{font-size:12px;line-height:1.5;color:var(--ink-2);margin:5px 0;display:grid;grid-template-columns:auto 1fr;gap:7px;align-items:baseline}
+.lyr-ac li .acid{font-family:var(--mono);font-size:.82em;color:var(--accent-ink);font-weight:700;background:var(--accent-soft);border-radius:4px;padding:0 5px;white-space:nowrap}
+.lyr-ac li .actxt{min-width:0}
+/* files are a subordinate list nested under the section band — flat rows, not
+   bordered cards, so a file never reads as its own section header. The code
+   appears as a contained block only when its row is expanded. */
+.lyr-files{margin-left:5px;padding-left:14px;border-left:2px solid var(--line)}
+.lyr-section[data-layer="0"] .lyr-files{border-left-color:color-mix(in srgb,var(--l0) 32%,var(--line))}
+.lyr-section[data-layer="1"] .lyr-files{border-left-color:color-mix(in srgb,var(--l1) 32%,var(--line))}
+.lyr-section[data-layer="2"] .lyr-files{border-left-color:color-mix(in srgb,var(--l2) 32%,var(--line))}
+.lyr-section[data-layer="3"] .lyr-files{border-left-color:color-mix(in srgb,var(--l3) 32%,var(--line))}
+.lyr-section[data-layer="4"] .lyr-files{border-left-color:color-mix(in srgb,var(--l4) 32%,var(--line))}
+.diff-file{margin:0;border-bottom:1px solid var(--line)}
+.diff-file:last-child{border-bottom:none}
+.fhead{display:flex;align-items:center;gap:9px;padding:7px 7px;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);background:none;cursor:pointer;border-radius:6px}
+.fhead:hover{background:color-mix(in srgb,var(--accent) 8%,transparent);color:var(--ink)}
+.diff-file:not(.collapsed) .fhead{color:var(--ink);font-weight:600}
+.diff-file.collapsed .fbody{display:none}
+.fhead .fp{overflow-wrap:anywhere}
+.fhead .chev{color:var(--ink-3);font-size:9px;flex:none;transition:transform .15s}
+.diff-file:not(.collapsed) .fhead .chev{transform:rotate(90deg)}
+.fbody{margin:1px 0 10px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.fmeta{margin-left:auto;display:inline-flex;gap:8px;align-items:center;font-family:var(--sans);font-size:11px;color:var(--ink-3)}
+.fmeta .adds{color:var(--good)} .fmeta .dels{color:var(--bad)}
+.fowners{display:inline-flex;gap:4px;align-items:center}
+.odot{width:9px;height:9px;border-radius:50%;flex:none}
+.odot[data-layer="0"]{background:var(--l0)} .odot[data-layer="1"]{background:var(--l1)}
+.odot[data-layer="2"]{background:var(--l2)} .odot[data-layer="3"]{background:var(--l3)} .odot[data-layer="4"]{background:var(--l4)}
+.seam{font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--bad);background:var(--bad-soft);border:1px solid color-mix(in srgb,var(--bad) 35%,transparent);border-radius:4px;padding:1px 6px;font-family:var(--sans)}
+.hunk-head{font-family:var(--mono);font-size:11px;color:var(--ink-3);background:color-mix(in srgb,var(--accent) 5%,var(--surface));padding:3px 13px;border-top:1px solid var(--line)}
+.hunk-head:first-child{border-top:none}
+pre.code{margin:0;font-family:var(--mono);font-size:12px;line-height:1.5;overflow-x:auto}
+.dl{display:flex;position:relative}
+.dl .ln{flex:none;width:46px;text-align:right;padding:0 8px 0 0;color:var(--ink-3);user-select:none;font-variant-numeric:tabular-nums;border-right:1px solid var(--line)}
+.dl .sign{flex:none;width:16px;text-align:center;color:var(--ink-3)}
+.dl .txt{padding:0 10px;white-space:pre}
+.dl.add{background:var(--add-bg)} .dl.del{background:var(--bad-soft)}
+.dl.add .sign{color:var(--good)} .dl.del .sign{color:var(--bad)}
+.dl[data-layer="0"]{box-shadow:inset 3px 0 0 var(--l0)}
+.dl[data-layer="1"]{box-shadow:inset 3px 0 0 var(--l1)}
+.dl[data-layer="2"]{box-shadow:inset 3px 0 0 var(--l2)}
+.dl[data-layer="3"]{box-shadow:inset 3px 0 0 var(--l3)}
+.dl[data-layer="4"]{box-shadow:inset 3px 0 0 var(--l4)}
+/* clickable (decision-anchored) lines are highlighted at rest so the clickable
+   set is scannable, then strengthen on hover/select */
+.dl.attr{cursor:pointer}
+.dl.attr::after{content:"";position:absolute;inset:0;pointer-events:none;background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.dl.attr:hover::after,.dl.attr.sel::after{background:color-mix(in srgb,var(--accent) 17%,transparent)}
+.dl.attr .ln{color:var(--accent-ink);font-weight:700}
+.dl.attr .txt,.dl.attr .ln,.dl.attr .sign{position:relative;z-index:1}
+.dl.attr .txt::after{content:"  ↳ why";color:var(--accent);font-weight:600;opacity:.55}
+.dl.attr:hover .txt::after,.dl.attr.sel .txt::after{opacity:1}
+.dl.attr.sel{outline:1px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:-1px}
+
+.why{border-left:1px solid var(--line);overflow-y:auto;padding:16px 20px 60px;background:var(--ground)}
+.why-hint{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600;margin-bottom:12px}
+.why-empty{color:var(--ink-3);font-size:12.5px;padding:8px 2px;line-height:1.55}
+.wcard{display:none} .wcard.on{display:block}
+.wc-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.wc-layer{font-family:var(--mono);font-size:11px;font-weight:700;padding:1px 7px;border-radius:5px}
+.wc-layer[data-layer="0"]{background:var(--l0-soft);color:var(--l0)}
+.wc-layer[data-layer="1"]{background:var(--l1-soft);color:var(--l1)}
+.wc-layer[data-layer="2"]{background:var(--l2-soft);color:var(--l2)}
+.wc-layer[data-layer="3"]{background:var(--l3-soft);color:var(--l3)}
+.wc-layer[data-layer="4"]{background:var(--l4-soft);color:var(--l4)}
+.wc-prov{font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--l3);background:var(--l3-soft);border-radius:4px;padding:1px 6px}
+.wc-num{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--accent);background:var(--accent-soft);border-radius:5px;padding:1px 7px}
+.wc-title{font-size:16px;font-weight:640;letter-spacing:-.01em;margin:2px 0 10px;line-height:1.32}
+.wc-chose{font-size:13.5px;line-height:1.55;margin:0 0 12px}
+.wc-chose code,.wc-why code{font-family:var(--mono);font-size:.87em;background:var(--surface-2);padding:1px 5px;border-radius:4px}
+.wc-contrast{display:flex;gap:9px;align-items:baseline;margin-bottom:12px;font-size:12.5px;padding-left:10px;border-left:2px solid color-mix(in srgb,var(--bad) 45%,transparent)}
+.wc-ck{font-size:10px;letter-spacing:.06em;text-transform:uppercase;font-weight:700;color:var(--bad);flex:none}
+.wc-cv{color:var(--ink-3)} .wc-cv .strike{text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--bad) 60%,transparent)}
+.wc-lbl{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600;margin-bottom:6px}
+.wc-why{font-size:13.5px;line-height:1.6;margin:0}
+.wc-edge{margin-top:14px;border-left:3px solid var(--accent);background:var(--accent-soft);padding:9px 13px;border-radius:0 8px 8px 0;font-size:12px;line-height:1.5;color:var(--ink-2)}
+.wc-edge .es{display:block;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-ink);margin-bottom:4px}
+.wc-edge code{font-family:var(--mono);font-size:.9em}
+
+@media (max-width:1000px){
+  .stack{grid-template-columns:1fr;grid-auto-rows:min-content;overflow-y:auto}
+  .app{height:auto}
+  .rail,.why{border-right:none;border-bottom:1px solid var(--line)}
+  .lyr-banner{position:static}
+}

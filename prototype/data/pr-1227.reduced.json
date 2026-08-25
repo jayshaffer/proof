@@ -1,0 +1,436 @@
+{
+  "contract": "proof.spine/v2",
+  "pr": {
+    "number": "NEV-1645",
+    "ticket": "NEV-1645"
+  },
+  "decisions": [
+    {
+      "id": "d1",
+      "title": "Marketing is a pure passthrough — forward three fields, touch no storage",
+      "chose": "Forward couchdrop_shared_link_url + practice_email + email_type straight to HubSpot.",
+      "rejected": "Have marketing read S3 / call Couchdrop / hold Couchdrop credentials to build the link itself",
+      "why": "Scoping marketing to a passthrough keeps blast radius tiny: no S3, no Couchdrop, no Couchdrop credentials. The payload builder is the whole of its data handling.",
+      "ac": [
+        "AC-6"
+      ],
+      "isReject": false,
+      "provenance": "author-confirmed",
+      "provenanceTrail": [
+        {
+          "seq": 1,
+          "event": "propose",
+          "by": "agent",
+          "phase": "plan"
+        },
+        {
+          "seq": 5,
+          "event": "confirm",
+          "by": "human",
+          "phase": "plan",
+          "reason": "plan approved (ClaudePlanApproved) — passthrough scope, flag gate, idempotency, and payload-typing approach signed off"
+        },
+        {
+          "seq": 9,
+          "event": "realize",
+          "by": "agent",
+          "phase": "execute"
+        }
+      ],
+      "history": [],
+      "evidence": [
+        {
+          "kind": "anchor",
+          "code": {
+            "file": "packages/marketing/src/subscription/practice-report.default.ts",
+            "lines": "72-78",
+            "hl": [
+              73,
+              77
+            ],
+            "context": false
+          }
+        }
+      ],
+      "tests": []
+    },
+    {
+      "id": "d2",
+      "title": "Gate the send behind a flag that ships off, keyed on practice with no PHI",
+      "chose": "Evaluate marketing-practice-report-send-enabled with context { kind: \"practice\", key: practice_sf_account_id }, fallback false.",
+      "rejected": "Ship the send path live, or key the flag on the recipient / patient",
+      "why": "Flag ships off and is flipped on deliberately after deploy, so the new path changes nothing until intended, and can be withdrawn during a HubSpot incident with no redeploy. Context carries only the SF account id — no PHI to LaunchDarkly. Fails closed.",
+      "ac": [
+        "AC-1",
+        "AC-7"
+      ],
+      "isReject": false,
+      "provenance": "author-confirmed",
+      "provenanceTrail": [
+        {
+          "seq": 2,
+          "event": "propose",
+          "by": "agent",
+          "phase": "plan"
+        },
+        {
+          "seq": 6,
+          "event": "confirm",
+          "by": "human",
+          "phase": "plan"
+        },
+        {
+          "seq": 10,
+          "event": "realize",
+          "by": "agent",
+          "phase": "execute"
+        }
+      ],
+      "history": [],
+      "evidence": [
+        {
+          "kind": "anchor",
+          "code": {
+            "file": "packages/marketing/src/features/general-features.ld.ts",
+            "lines": "41-49",
+            "hl": [
+              42,
+              48
+            ],
+            "context": false
+          }
+        }
+      ],
+      "tests": []
+    },
+    {
+      "id": "d5",
+      "title": "Claim an idempotency slot so redelivery never double-sends",
+      "chose": "Claim (practice_id, report_type, batch_period) before sending; a lost claim refuses the send.",
+      "rejected": "Send on every delivery, or check-then-insert (racy under concurrent partitions)",
+      "why": "Kafka is at-least-once and the consumer runs four partitions concurrently, so the same report can arrive twice. An atomic INSERT ... ON CONFLICT DO NOTHING turns duplicate delivery into a no-op instead of a duplicate email.",
+      "ac": [
+        "AC-3"
+      ],
+      "isReject": false,
+      "provenance": "author-confirmed",
+      "provenanceTrail": [
+        {
+          "seq": 3,
+          "event": "propose",
+          "by": "agent",
+          "phase": "plan"
+        },
+        {
+          "seq": 7,
+          "event": "confirm",
+          "by": "human",
+          "phase": "plan"
+        },
+        {
+          "seq": 11,
+          "event": "realize",
+          "by": "agent",
+          "phase": "execute"
+        }
+      ],
+      "history": [],
+      "evidence": [
+        {
+          "kind": "trace",
+          "code": {
+            "file": "packages/marketing/src/subscription/practice-report.default.ts",
+            "lines": "42-52",
+            "hl": [
+              43,
+              51
+            ],
+            "context": false
+          }
+        },
+        {
+          "kind": "anchor",
+          "code": {
+            "file": "packages/marketing/src/repository/practice-report-email-sends.postgres.ts",
+            "lines": "~claim",
+            "hl": [],
+            "context": true
+          }
+        }
+      ],
+      "tests": [
+        {
+          "file": "packages/marketing/src/subscription/practice-report.default.test.ts",
+          "name": "claims the slot for (practice, report_type, batch_period)"
+        },
+        {
+          "file": "packages/marketing/src/subscription/practice-report.default.test.ts",
+          "name": "refuses the claim and makes no HubSpot request on redelivery"
+        }
+      ]
+    },
+    {
+      "id": "d3",
+      "title": "Give the practice-report send its own payload type — don't widen the union",
+      "chose": "Add HubSpotPracticeReportWebhookPayload as a separate type, accepted by sendHubSpotWebhook via a union at the parameter.",
+      "rejected": "Add the practice-report case as a member of the existing HubSpotWebhookPayload union",
+      "why": "On trying to widen the union, tsc broke narrowing in buildPartnerReferralWebhookPayload — that union is closed over the partner-referral EmailType and the builder relies on the closure. A separate type carries no per-patient enrichment and leaves every consumer that narrows on the old union untouched.",
+      "ac": [
+        "AC-5"
+      ],
+      "isReject": false,
+      "provenance": "machine-verified",
+      "provenanceTrail": [
+        {
+          "seq": 4,
+          "event": "propose",
+          "by": "agent",
+          "phase": "plan"
+        },
+        {
+          "seq": 8,
+          "event": "confirm",
+          "by": "human",
+          "phase": "plan"
+        },
+        {
+          "seq": 12,
+          "event": "revise",
+          "by": "agent",
+          "phase": "execute",
+          "reason": "planned to reuse the union (seq 4); widening it broke narrowing in buildPartnerReferralWebhookPayload, so switched to a standalone type"
+        },
+        {
+          "seq": 17,
+          "event": "verify",
+          "by": "agent",
+          "phase": "review",
+          "reason": "diff-critic confirmed the standalone type leaves the partner-referral union's narrowing intact; anchor hubspot-webhook-client.ts:33-45 resolves at HEAD"
+        }
+      ],
+      "history": [
+        {
+          "seq": 4,
+          "chose": "Add the practice-report case as a member of HubSpotWebhookPayload so sendHubSpotWebhook takes it unchanged.",
+          "why": "Reuse the union the partner-referral path already flows through — one type, one send function, less to add.",
+          "reason": "planned to reuse the union (seq 4); widening it broke narrowing in buildPartnerReferralWebhookPayload, so switched to a standalone type"
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "anchor",
+          "code": {
+            "file": "packages/marketing/src/comms/hubspot-webhook-client.ts",
+            "lines": "33-45",
+            "hl": [
+              33,
+              37
+            ],
+            "context": false
+          }
+        }
+      ],
+      "tests": []
+    },
+    {
+      "id": "d4",
+      "title": "Decompose the handler into gate → claim → send",
+      "chose": "Split practiceReportGenerated into three guard-clause steps: is-send-enabled, claim-slot, send-claimed.",
+      "rejected": "One method that flag-checks, claims, composes, POSTs, and releases inline",
+      "why": "Each step is a guard that returns early, so the happy path reads top to bottom and each precondition is checkable in isolation. Mirrors the established PartnerReferralSubscription flow, so a reviewer who knows that precedent knows this shape.",
+      "ac": [
+        "AC-2"
+      ],
+      "isReject": false,
+      "provenance": "first-hand",
+      "provenanceTrail": [
+        {
+          "seq": 13,
+          "event": "realize",
+          "by": "agent",
+          "phase": "execute"
+        }
+      ],
+      "history": [],
+      "evidence": [
+        {
+          "kind": "trace",
+          "code": {
+            "file": "packages/marketing/src/subscription/practice-report.default.ts",
+            "lines": "21-30",
+            "hl": [
+              22,
+              29
+            ],
+            "context": false
+          }
+        }
+      ],
+      "tests": [
+        {
+          "file": "packages/marketing/src/subscription/practice-report.default.test.ts",
+          "name": "makes no HubSpot request when the flag is off"
+        },
+        {
+          "file": "packages/marketing/src/subscription/practice-report.default.test.ts",
+          "name": "never claims a slot when the flag is off"
+        }
+      ]
+    },
+    {
+      "id": "d6",
+      "title": "Release the slot on send failure so a later flip re-drives cleanly",
+      "chose": "Track a sent flag; in finally, release the claim if the send did not succeed, then rethrow.",
+      "rejected": "Leave the slot claimed on failure (permanent), or release unconditionally",
+      "why": "A claimed-but-unsent slot would permanently block that report — a HubSpot outage would swallow it forever. Releasing only on failure lets a retry or later flag flip re-drive; releasing unconditionally would defeat the idempotency guard on the success path. Rethrowing preserves at-least-once retry.",
+      "ac": [
+        "AC-4"
+      ],
+      "isReject": false,
+      "provenance": "machine-verified",
+      "provenanceTrail": [
+        {
+          "seq": 14,
+          "event": "realize",
+          "by": "agent",
+          "phase": "execute"
+        },
+        {
+          "seq": 18,
+          "event": "verify",
+          "by": "agent",
+          "phase": "review",
+          "reason": "tests 'releases the claim so the next batch can retry' and 'propagates the failure...' present and green; the finally-release anchor resolves at HEAD"
+        }
+      ],
+      "history": [],
+      "evidence": [
+        {
+          "kind": "trace",
+          "code": {
+            "file": "packages/marketing/src/subscription/practice-report.default.ts",
+            "lines": "54-70",
+            "hl": [
+              64,
+              69
+            ],
+            "context": false
+          }
+        }
+      ],
+      "tests": [
+        {
+          "file": "packages/marketing/src/subscription/practice-report.default.test.ts",
+          "name": "releases the claim so the next batch can retry"
+        },
+        {
+          "file": "packages/marketing/src/subscription/practice-report.default.test.ts",
+          "name": "propagates the failure so consumer retry semantics engage"
+        }
+      ]
+    },
+    {
+      "id": "r1",
+      "title": "Leave the producer's report_type field on the wire schema",
+      "chose": "Keep PracticeReportEntity.report_type in event-schemas.ts even though the handler claims on email_type.",
+      "rejected": "Remove the unused report_type field",
+      "why": "It is the producer's wire contract; removing it would be a schema/contract change on a shared topic, out of scope for this send-path PR.",
+      "ac": [],
+      "isReject": true,
+      "provenance": "through-review",
+      "provenanceTrail": [
+        {
+          "seq": 15,
+          "event": "reject",
+          "by": "agent",
+          "phase": "review",
+          "reason": "review flagged report_type as unused; declined — it's the producer's contract, not ours to drop here"
+        }
+      ],
+      "history": [],
+      "evidence": [
+        {
+          "kind": "anchor",
+          "code": {
+            "file": "packages/kafka-consumer/src/practice-reports/event-schemas.ts",
+            "lines": "~report_type",
+            "hl": [],
+            "context": true
+          }
+        }
+      ],
+      "tests": []
+    },
+    {
+      "id": "r2",
+      "title": "Keep the catch-block log identical to the partner-referral precedent",
+      "chose": "Log event.uuid / event.trace_id as raw Public<> wrappers in the generated-handler catch, matching the shipped PartnerReferralCreatedEventHandler byte-for-byte.",
+      "rejected": "Unwrap .value() in the log line here",
+      "why": "The handler is a deliberate byte-for-byte copy of the shipped precedent; diverging the log format in this PR would fork the two handlers for no behavioural gain.",
+      "ac": [],
+      "isReject": true,
+      "provenance": "through-review",
+      "provenanceTrail": [
+        {
+          "seq": 16,
+          "event": "reject",
+          "by": "agent",
+          "phase": "review",
+          "reason": "review noted the wrappers aren't unwrapped; declined — matching the precedent copy is the point"
+        }
+      ],
+      "history": [],
+      "evidence": [
+        {
+          "kind": "anchor",
+          "code": {
+            "file": "packages/kafka-consumer/src/practice-reports/generated-handler.ts",
+            "lines": "~catch",
+            "hl": [],
+            "context": true
+          }
+        }
+      ],
+      "tests": []
+    }
+  ],
+  "coverage": {
+    "explained": [
+      {
+        "file": "packages/marketing/src/subscription/practice-report.default.ts",
+        "byDecisions": [
+          "d1",
+          "d5",
+          "d4",
+          "d6"
+        ]
+      },
+      {
+        "file": "packages/marketing/src/features/general-features.ld.ts",
+        "byDecisions": [
+          "d2"
+        ]
+      },
+      {
+        "file": "packages/marketing/src/comms/hubspot-webhook-client.ts",
+        "byDecisions": [
+          "d3"
+        ]
+      }
+    ],
+    "tests": [
+      {
+        "file": "packages/marketing/src/subscription/practice-report.default.test.ts",
+        "covers": "claims the slot for (practice, report_type, batch_period) / refuses the claim and makes no HubSpot request on redelivery / makes no HubSpot request when the flag is off / never claims a slot when the flag is off / releases the claim so the next batch can retry / propagates the failure so consumer retry semantics engage"
+      }
+    ]
+  },
+  "ledgerMeta": {
+    "ticket": "NEV-1645",
+    "events": 19,
+    "closed": {
+      "seq": 19,
+      "reason": "all 7 AC invariants upheld; marketing 1021/1021, kafka-consumer 196/196; no code changed by the review pass"
+    }
+  }
+}

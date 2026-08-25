@@ -1,0 +1,30 @@
+{
+  "repo": "pathccm/attribution-service",
+  "base": "main",
+  "topPr": 1539,
+  "epic": {
+    "badge": "SAMPLE",
+    "src": "prototype/data/*.ledger.jsonl",
+    "title": "proof stack sample",
+    "note": "Dev-only synthetic stack: two unrelated committed ledgers stacked to exercise compose → validate → render offline. Not a real PR chain — a real multi-layer sample awaits per-layer ledgers from the deferred /proof:retrofit-stack skill.",
+    "goal": "Exercises the deterministic <code>proof.stack/v1</code> pipeline end-to-end with no network: two committed reduced spines folded into one stack, validated per-layer, and rendered self-contained."
+  },
+  "layers": [
+    {
+      "pr": 1227,
+      "ticket": "NEV-1645",
+      "phase": "layer 0",
+      "summary": "Foundation ledger (decisions only; its diff is not ingested in the offline sample).",
+      "capability": "Foundation",
+      "spine": "pr-1227.reduced.json"
+    },
+    {
+      "pr": 1539,
+      "ticket": "NEV-1539",
+      "phase": "layer 1",
+      "summary": "Provision a real recipient-scoped Couchdrop shared link, replacing the sentinel.",
+      "capability": "Couchdrop shared-link provisioning",
+      "spine": "nev-1539.reduced.json"
+    }
+  ]
+}

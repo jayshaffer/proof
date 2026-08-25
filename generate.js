@@ -613,10 +613,118 @@ ${assets.css}
 `;
 }
 
+// proof.stack/v1 → the render model the stack client (generator/stack-client.js)
+// consumes. Decision ids are namespaced L<i>:<id> so the shared document's
+// per-decision selectors can't cross-wire between layers. Ledger-derived prose
+// (title/chose/rejected/why, layer title) is escaped here — the single escaping
+// path for untrusted text; manifest display fields (epic goal/note, summary,
+// capability, AC text) are author-controlled and pass through, escaped by the
+// client where it injects them.
+function stackRenderModel(data) {
+  const layers = (data.stack && data.stack.layers) || [];
+  const edges = data.edges || [];
+  const LAYERS = [];
+  const DECISIONS = {};
+  const FILES = [];
+  layers.forEach((L, i) => {
+    const spine = L.spine || {};
+    const diff = spine.diff || [];
+    let adds = 0, dels = 0;
+    for (const f of diff) for (const h of f.hunks || []) for (const ln of h.lines || []) {
+      if (ln.sign === "+") adds++; else if (ln.sign === "-") dels++;
+    }
+    LAYERS.push({
+      layer: String(i), pr: L.pr, phase: L.phase || "",
+      title: esc(L.title || (spine.pr && spine.pr.title) || `PR ${L.pr}`),
+      adds, dels, files: diff.length,
+      prov: L.provenance || "through-review",
+      decisions: (spine.decisions || []).filter((d) => !d.isReject).length,
+      edge: L.edge || null,
+      summary: L.summary || "",
+      ticket: { capability: L.capability || "", ac: L.ac || [] },
+    });
+    for (const d of spine.decisions || []) {
+      const out = edges.find((e) => e.from.layer === i && e.from.decision === d.id);
+      const to = out && layers[out.to.layer];
+      DECISIONS[`L${i}:${d.id}`] = {
+        layer: String(i), num: d.id, prov: d.provenance || "through-review",
+        title: esc(d.title || ""), chose: esc(d.chose || ""),
+        ck: d.rejected ? "Instead of" : "", cv: esc(d.rejected || ""), why: esc(d.why || ""),
+        edge: to ? { to: "#" + to.pr, text: `anchors <code>${esc(out.file || "")}</code> introduced by #${to.pr}` } : null,
+      };
+    }
+    for (const f of diff) {
+      let hasAnchor = false, fadds = 0, fdels = 0;
+      const hunks = (f.hunks || []).map((h) => ({
+        header: h.header,
+        lines: (h.lines || []).map((ln) => {
+          const d = ln.decision ? `L${i}:${ln.decision}` : undefined;
+          if (d) hasAnchor = true;
+          if (ln.sign === "+") fadds++; else if (ln.sign === "-") fdels++;
+          return { s: ln.sign, n: ln.new, o: ln.old, t: ln.text, d };
+        }),
+      }));
+      FILES.push({ path: f.file, layer: String(i), hunks, adds: fadds, dels: fdels, hasAnchor });
+    }
+  });
+  return { LAYERS, DECISIONS, FILES, seams: data.seams || {}, epic: (data.stack && data.stack.epic) || null };
+}
+
+function renderStackPage(data, assets) {
+  const stack = data.stack || {};
+  const repo = stack.repo || "";
+  const title = (stack.epic && stack.epic.title) || repo || "stack walkthrough";
+  const model = stackRenderModel(data);
+  // Escape "<" in the injected JSON so no diff/prose content can close the
+  // <script> element early. JSON is otherwise inert.
+  const json = JSON.stringify(model).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)} — stack</title>
+<style>
+${assets.stackCss}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <span class="brand-num">stack</span>
+    <span class="brand-title">${esc(title)}</span>
+    <span class="brand-repo">${esc(repo)}</span>
+    <span class="brand-meta" id="brand-meta"></span>
+    <span class="spacer"></span>
+    <button class="theme-toggle" id="theme-toggle">◐ Theme</button>
+  </div>
+  <div class="peelbar">
+    <span class="peelbar-lbl">Peel</span>
+    <span class="peel-state" id="peel-state"></span>
+    <label class="peel-mode"><input type="checkbox" id="peel-cumulative"> cumulative (through selected layer)</label>
+  </div>
+  <div class="stack">
+    <nav class="rail" id="rail"></nav>
+    <main class="diffcol" id="diffcol"></main>
+    <aside class="why" id="why"></aside>
+  </div>
+</div>
+<script>
+var DATA=${json};
+</script>
+<script>
+${assets.stackClient}
+</script>
+</body>
+</html>
+`;
+}
+
 function render(data, assets) {
   const { pr = {}, decisions = [], coverage, diff } = data;
   PR = pr;
   TEMPLATES = assets.templates;
+  if (data.contract === "proof.stack/v1") return renderStackPage(data, assets);
   if (data.contract === "proof.spine/v2") return renderV2Page(data, assets);
   const hasDiff = Array.isArray(diff) && diff.length > 0;
   const changedFiles = hasDiff ? diff.length : 0;
@@ -658,6 +766,8 @@ function loadAssets() {
   return {
     css: g("style.css"),
     client: g("client.js").replace(/\n$/, ""),
+    stackCss: g("stack.css"),
+    stackClient: g("stack-client.js").replace(/\n$/, ""),
     templates: {
       page: g("templates", "page.ejs"),
       decisionCard: g("templates", "decision-card.ejs"),
@@ -677,7 +787,11 @@ function main() {
   }
   const data = JSON.parse(fs.readFileSync(src, "utf8"));
   fs.writeFileSync(out, render(data, loadAssets()));
-  console.log(`wrote ${out} · ${(data.decisions || []).length} decisions`);
+  const summary =
+    data.contract === "proof.stack/v1"
+      ? `${((data.stack && data.stack.layers) || []).length} layers`
+      : `${(data.decisions || []).length} decisions`;
+  console.log(`wrote ${out} · ${summary}`);
 }
 
 if (require.main === module) main();

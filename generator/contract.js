@@ -13,6 +13,7 @@
 const SUPPORTED = {
   "proof.ledger": [1],
   "proof.spine": [1, 2],
+  "proof.stack": [1],
 };
 
 function parseContract(tag) {

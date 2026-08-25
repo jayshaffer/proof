@@ -9,6 +9,34 @@ const path = require("path");
 const { negotiate } = require("./generator/contract");
 const { checkFile } = require("./generator/schema-check");
 
+// The proof.spine/v2 ruleset, factored out so a single-PR v2 payload and each
+// layer of a proof.stack/v1 payload run the identical checks. Pure — returns
+// { errs, warns, ids } and never exits. (ledger-native: no author/quote checks;
+// provenance is a derived tier.)
+function validateSpineV2(spine) {
+  const errs = checkFile(path.join(__dirname, "schemas", "spine.v2.schema.json"), spine);
+  const ids = new Set((spine.decisions || []).map((d) => d.id));
+  for (const e of (spine.coverage && spine.coverage.explained) || []) {
+    for (const id of e.byDecisions || []) {
+      if (!ids.has(id)) errs.push({ path: `coverage.explained[${e.file}]`, message: `unknown decision "${id}"` });
+    }
+  }
+  const warns = [];
+  if (Array.isArray(spine.diff)) {
+    const covFiles = new Map();
+    for (const b of ["explained", "tests"])
+      for (const e of (spine.coverage && spine.coverage[b]) || []) covFiles.set(e.file, b);
+    for (const f of spine.diff) {
+      if (!covFiles.has(f.file)) warns.push(`diff: ${f.file} not in coverage — unexplained`);
+      for (const h of f.hunks || [])
+        for (const ln of h.lines || [])
+          if (ln.decision && !ids.has(ln.decision))
+            errs.push({ path: `diff[${f.file}]:${ln.new}`, message: `cites unknown decision "${ln.decision}"` });
+    }
+  }
+  return { errs, warns, ids };
+}
+
 const file = process.argv[2];
 if (!file) {
   console.error("usage: node validate.js <data.json>");
@@ -16,6 +44,60 @@ if (!file) {
 }
 
 const data = JSON.parse(fs.readFileSync(file, "utf8"));
+
+// Stack payloads (proof.stack/v1) wrap N proof.spine/v2 layers. Detect and
+// validate them here — each layer against the shared v2 ruleset, plus
+// cross-layer edge/seam integrity — before the single-spine negotiation below,
+// which would otherwise reject a stack contract as a foreign payload.
+if (typeof data.contract === "string" && data.contract.startsWith("proof.stack/")) {
+  try {
+    negotiate(data.contract, "proof.stack", { defaultMajor: 1 });
+  } catch (e) {
+    console.error(`contract error: ${e.message}`);
+    process.exit(2);
+  }
+  const errs = checkFile(path.join(__dirname, "schemas", "stack.v1.schema.json"), data);
+  const layers = (data.stack && data.stack.layers) || [];
+  const layerIds = [];
+  layers.forEach((L, i) => {
+    const spine = L.spine || {};
+    try {
+      negotiate(spine.contract, "proof.spine", { defaultMajor: 1 });
+    } catch (e) {
+      errs.push({ path: `L${i}.spine`, message: e.message });
+    }
+    const r = validateSpineV2(spine);
+    layerIds[i] = r.ids;
+    for (const e of r.errs) errs.push({ path: `L${i}:${e.path}`, message: e.message });
+    for (const w of r.warns) console.log(`  warn  L${i}: ${w}`);
+  });
+  // builds-on edges must resolve to a real (layer, decision) and point downward
+  for (const [k, ed] of (data.edges || []).entries()) {
+    for (const end of ["from", "to"]) {
+      const p = ed[end] || {};
+      if (!layers[p.layer]) errs.push({ path: `edges[${k}].${end}`, message: `layer ${p.layer} out of range` });
+      else if (!(layerIds[p.layer] && layerIds[p.layer].has(p.decision)))
+        errs.push({ path: `edges[${k}].${end}`, message: `decision "${p.decision}" not in layer ${p.layer}` });
+    }
+    if (ed.from && ed.to && ed.from.layer <= ed.to.layer)
+      errs.push({ path: `edges[${k}]`, message: `builds-on must point to a lower layer (from ${ed.from.layer} → ${ed.to.layer})` });
+  }
+  // seams must name real layers whose diff actually contains the file
+  for (const [fileKey, ls] of Object.entries(data.seams || {})) {
+    for (const li of ls) {
+      const L = layers[li];
+      if (!L) { errs.push({ path: `seams["${fileKey}"]`, message: `layer ${li} out of range` }); continue; }
+      const has = ((L.spine && L.spine.diff) || []).some((f) => f.file === fileKey);
+      if (!has) errs.push({ path: `seams["${fileKey}"]`, message: `not in layer ${li} diff` });
+    }
+  }
+  for (const e of errs) console.log(`  ERROR ${e.path} — ${e.message}`);
+  console.log(
+    `proof.stack/v1 · ${layers.length} layers · ${(data.edges || []).length} edges · ${Object.keys(data.seams || {}).length} seams`,
+  );
+  console.log(errs.length ? `\n${errs.length} error(s)` : "\nvalid");
+  process.exit(errs.length ? 1 : 0);
+}
 
 // Contract gate: this validator implements the proof.spine/v1 ruleset. A newer
 // or foreign contract is a precondition error (exit 2), not a data-invalid
@@ -36,30 +118,8 @@ if (contract.assumed) data.contract = "proof.spine/v1";
 // — no author/quote checks (provenance is a derived tier, not a quote). Runs and
 // exits here so the v1 path below stays untouched.
 if (contract.major === 2) {
-  const errs = checkFile(path.join(__dirname, "schemas", "spine.v2.schema.json"), data);
-  const ids = new Set((data.decisions || []).map((d) => d.id));
-  for (const e of (data.coverage && data.coverage.explained) || []) {
-    for (const id of e.byDecisions || []) {
-      if (!ids.has(id)) errs.push({ path: `coverage.explained[${e.file}]`, message: `unknown decision "${id}"` });
-    }
-  }
-  // Diff (optional, derived by ingest-diff.js): line attributions must cite real
-  // decisions. Files absent from coverage warn (retrofit's unexplained remainder),
-  // they don't error.
-  const v2warn = [];
-  if (Array.isArray(data.diff)) {
-    const covFiles = new Map();
-    for (const b of ["explained", "tests"])
-      for (const e of (data.coverage && data.coverage[b]) || []) covFiles.set(e.file, b);
-    for (const f of data.diff) {
-      if (!covFiles.has(f.file)) v2warn.push(`diff: ${f.file} not in coverage — unexplained`);
-      for (const h of f.hunks || [])
-        for (const ln of h.lines || [])
-          if (ln.decision && !ids.has(ln.decision))
-            errs.push({ path: `diff[${f.file}]:${ln.new}`, message: `cites unknown decision "${ln.decision}"` });
-    }
-  }
-  for (const w of v2warn) console.log(`  warn  ${w}`);
+  const { errs, warns } = validateSpineV2(data);
+  for (const w of warns) console.log(`  warn  ${w}`);
   for (const e of errs) console.log(`  ERROR ${e.path} — ${e.message}`);
   const decs = (data.decisions || []).filter((d) => !d.isReject).length;
   const rej = (data.decisions || []).length - decs;
