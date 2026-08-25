@@ -160,6 +160,31 @@ The skill resolves its scripts via `${CLAUDE_PLUGIN_ROOT}` (Claude Code substitu
 install path into the skill content) and writes the ledger + HTML to `./proof-out/` in whatever
 repo you invoke it from.
 
+## Stacks — one walkthrough for a chain of PRs
+
+Work often ships as a **stack**: a chain of PRs where each one's head branch is the next one's
+base, promoted to `main` bottom-up. `proof.sh stack` folds a stack into one walkthrough —
+`proof.stack/v1`, composed from the per-layer spines — that shows layer ownership, the **seams**
+where more than one layer touches a file, and the **builds-on edges** where a later layer's
+decision rests on a file a lower layer introduced. It also embeds a **Stack** tab into each
+layer's own `pr-<n>.html`, pinned to that layer.
+
+```sh
+./proof.sh stack <manifest.json> [--repo owner/name] [--out dir]
+```
+
+The manifest names the layers bottom→top, each pointing at a `ledger` (retrofit it per layer) or
+a pre-reduced `spine`. To go from a single PR number to the whole rendered stack without writing
+the manifest by hand, use the `/proof:retrofit-stack` skill: it runs `generator/resolve-stack.js`
+to walk the open-PR ref topology from any entry PR (down to the floor, up to the top), retrofits
+a ledger per layer, fills the manifest, and renders. The resolver alone (mechanical, no model) is:
+
+```sh
+gh pr list --repo owner/name --state open --limit 200 \
+  --json number,title,baseRefName,headRefName > prs.json
+node generator/resolve-stack.js <any-pr-in-the-stack> owner/name prs.json > stack.manifest.json
+```
+
 ## Layout
 
 ```
@@ -177,6 +202,8 @@ generator/
   style.css                    stylesheet, inlined at generate time
   ingest-diff.js               attributes each diff line to a decision
   reduce-ledger.js             folds a decision ledger into a walkthrough spine
+  compose-stack.js             folds per-layer spines into proof.stack/v1 (seams + builds-on edges)
+  resolve-stack.js             walks the PR ref graph → ordered stack + manifest skeleton
   ledger-cli.js                deterministic ledger writer (seq/id/commit/schema gate)
   contract.js                  wire-contract negotiation (proof.ledger, proof.spine)
   schema-check.js              zero-dep JSON Schema checker
@@ -189,6 +216,7 @@ prototype/
   data/*.json  data/*.ledger.jsonl   walkthrough data + ledgers (source of truth)
 skills/
   retrofit-ledger/             plugin skill (/proof:retrofit-ledger): PR artifacts → by:retrofit ledger
+  retrofit-stack/              plugin skill (/proof:retrofit-stack): any PR → resolve chain → per-layer ledgers → stack
 .github/
   workflows/proof.yml          CI job
   upsert-comment.sh            marker-based PR comment upsert

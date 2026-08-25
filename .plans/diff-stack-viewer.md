@@ -175,13 +175,35 @@ The proto (`protos/`) proved the UX; it is now real code. Details in
   transforms the wrapper into the client model (layer-namespaced decision ids) and inlines
   `generator/stack.css` + `generator/stack-client.js` (ported from the proto; separate assets
   so single-PR pages are untouched — no class collisions).
-- **`stack.sh`** — mirrors `retrofit.sh` looped: per-layer reduce → ingest `gh pr diff` →
-  enrich, then compose → validate → render. A layer may instead point at a committed `spine`
-  (offline, no `gh`).
+- **`proof.sh stack <manifest>`** — folded into the main entry point as a subcommand (was a
+  separate `stack.sh`): per-layer reduce → ingest `gh pr diff` → enrich, then compose →
+  validate → render. A layer may instead point at a committed `spine` (offline, no `gh`).
 - **Sample** — `prototype/data/stack-sample.manifest.json` (2 committed reduced spines,
   offline) wired into `build.sh`. A real multi-layer chain still awaits the deferred skill.
+- **Stack tab on the normal PR page** — `renderV2Page` now optionally renders a "Stack" tab
+  (`generator/stack-tab.css` + `generator/stack-tab-client.js`, `#view-stack`-scoped `st-*`
+  ports of the standalone rail/peel widget, so nothing collides with the page's own `.dl`,
+  `.diff-file`, `pre.code`, etc.). `proof.sh stack` now writes both the standalone
+  `stack-<top>.html` *and* one `pr-<n>.html` per layer with the tab embedded and pinned to
+  that layer (`stackDefaultLayer`, set explicitly by the orchestrator — a spine's own baked-in
+  `pr.number` isn't guaranteed to match the manifest's label for it, seen firsthand in the
+  synthetic sample). Additive: a `renderV2Page` call with no `stack` field is unchanged
+  (verified byte-identical modulo the pre-existing empty-conditional blank-line pattern).
 
-**Deferred (next cut):** `/proof:retrofit-stack` (bidirectional chain resolver + per-PR
-retrofit → manifest); the net-composed `main…top` diff with line reconciliation; a CI workflow.
+- **`/proof:retrofit-stack` — the bidirectional chain resolver + per-layer retrofit → manifest.**
+  `generator/resolve-stack.js` is the mechanical half: a pure function over the open-PR ref graph
+  (`gh pr list --json number,title,baseRefName,headRefName`, passed as a file/stdin so it needs no
+  network of its own) that walks *down* base branches to the stack floor and *up* to the top,
+  from any entry PR, and emits a `proof.sh stack` manifest skeleton (layers bottom→top, one
+  `ledger` path each). `skills/retrofit-stack/SKILL.md` is the interpretive half: resolve the
+  chain, drive `/proof:retrofit-ledger` per layer, fill the manifest, render via `proof.sh stack`.
+  Its one stack-specific rule is the `context:true` anchor on a consuming layer's decision — the
+  exact signal `compose-stack.js` needs for a builds-on edge (which is also why the edge detector
+  had to stop excluding context anchors; see that fix). Verified end-to-end against the real open
+  #300→#301 chain in `pathccm/attribution-service`: resolves from either entry point, 2 layers,
+  2 correct builds-on edges. Handles a middle entry, a partially-merged floor, a single PR, a
+  missing PR (exit 2), and a malformed cycle (terminates), all unit-checked offline.
+
+**Deferred (next cut):** the net-composed `main…top` diff with line reconciliation; a CI workflow.
 The **sample provenance** open question above stands — the committed sample is dev-only
 synthetic until real per-layer ledgers exist.
