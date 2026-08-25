@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pathccm.dev/proof/schemas/stack.v1.schema.json",
+  "title": "proof.stack/v1",
+  "description": "A stacked-PR walkthrough: an ordered list of proof.spine/v2 layers (bottom-to-top) plus decision-anchored builds-on edges and cross-layer seams. Each layer's spine is validated deeply by validate.js against spine.v2; this schema checks the wrapper shape only. Cross-field semantics (edges resolve to real (layer,decision); layers account for their diff files) are in validate.js.",
+  "type": "object",
+  "required": ["contract", "stack"],
+  "properties": {
+    "contract": { "type": "string", "pattern": "^proof\\.stack/v1$" },
+    "stack": {
+      "type": "object",
+      "required": ["layers"],
+      "properties": {
+        "repo": { "type": "string" },
+        "base": { "type": "string" },
+        "topPr": { "type": ["string", "number"] },
+        "epic": { "$ref": "#/$defs/epic" },
+        "layers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/layer" } }
+      }
+    },
+    "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } },
+    "seams": { "type": "object" }
+  },
+  "$defs": {
+    "epic": {
+      "type": "object",
+      "properties": {
+        "badge": { "type": "string" },
+        "src": { "type": "string" },
+        "title": { "type": "string" },
+        "note": { "type": "string" },
+        "goal": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "required": ["pr", "spine"],
+      "properties": {
+        "pr": { "type": ["string", "number"] },
+        "ticket": { "type": "string" },
+        "phase": { "type": "string" },
+        "summary": { "type": "string" },
+        "capability": { "type": "string" },
+        "provenance": { "type": "string" },
+        "edge": { "type": "string" },
+        "ac": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+              "id": { "type": "string" },
+              "text": { "type": "string" }
+            }
+          }
+        },
+        "spine": { "type": "object" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/endpoint" },
+        "to": { "$ref": "#/$defs/endpoint" },
+        "file": { "type": "string" }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "required": ["layer", "decision"],
+      "properties": {
+        "layer": { "type": "integer" },
+        "decision": { "type": "string" }
+      }
+    }
+  }
+}

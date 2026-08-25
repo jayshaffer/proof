@@ -1,0 +1,3200 @@
+diff --git a/.plans/dev-dashboard-internal-api.md b/.plans/dev-dashboard-internal-api.md
+new file mode 100644
+index 00000000..779895db
+--- /dev/null
++++ b/.plans/dev-dashboard-internal-api.md
+@@ -0,0 +1,751 @@
++# Plan: Dev Dashboard Internal API Entity Operations
++
++**TDD**: `docs/tdds/dev-dashboard-internal-api.md`
++**Target branch**: `feat/dev-dashboard-internal-api` (single feature branch)
++**Repo**: pathccm/attribution-service
++
++Acceptance criteria are derived from the TDD's three Capabilities and expressed in EARS
++(`WHEN` / `IF` / `WHERE` / `WHILE` … `the system SHALL` …), each mapped to named test
++cases. Structure follows `/jira:jira-start` (parse AC → expand to EARS → derive tests →
++phase the implementation), with the TDD standing in for a Jira description.
++
++---
++
++## 1. Research findings that change the TDD's assumptions
++
++Verified against the working tree before planning. Three corrections, five discoveries.
++Each one changes what gets built.
++
++### 1.1 The internal spec IS already Spectral-linted (TDD is stale)
++
++TDD:144 says "`docs/openapi-internal.yaml` is currently absent from Spectral linting;
++the root `openapi-lint` task targets the public spec only." No longer true:
++
++- `package.json:11` — `"openapi-lint": "spectral lint docs/openapi.yaml docs/openapi-internal.yaml"`
++- `Taskfile.yml` `openapi-lint` lists both specs under `sources:`
++- `pnpm exec spectral lint docs/openapi-internal.yaml` → **6 warnings, 0 errors**
++  (`operation-tags` and `owasp:api8:2023-define-error-responses-500` on the two
++  `options` operations)
++
++**Consequence**: TDD Open Question #2 is already resolved in code. But every new
++operation must satisfy Spectral's OWASP rules — `maxLength` on every string, `maxItems`
++on every array, `minimum`/`maximum` on every integer — or the warning count grows.
++"No new Spectral warnings" becomes an explicit AC (§4.5) rather than a PR-time surprise.
++
++*Unverified*: whether CI fails on warnings. `.github/workflows/linting.yml` delegates to
++`pathccm/shared-github-actions/.github/workflows/general-linting.yml@main`
++(`openapi-validation-version: 'v2'`); the threshold isn't visible in this repo. Plan
++holds new operations to zero warnings regardless.
++
++### 1.2 ElectroDB has purpose-built `create()` and `patch()` — do not hand-roll conditions
++
++The TDD says create "fails if the `id` already exists" (TDD:59) and update "applies only
++the fields supplied" (TDD:60) but not how. Verified in
++`electrodb@3.9.1/src/entity.js`:
++
++| Primitive | Line | Behavior |
++|---|---|---|
++| `create()` | `:394` | `put` + `attribute_not_exists` condition |
++| `patch()` | `:414` | `update` + `attribute_exists` condition |
++| `returnOnConditionCheckFailure` | `:815-840` | returns `{ rejected: true }` instead of throwing |
++| `_isConditionalCheckFailedException` | `:869` | matches `err.name`/`err.code` — not message text |
++
++**Consequence**: create/update use `create()`/`patch()` with
++`.go({ returnOnConditionCheckFailure: true })` and a `rejected` check. This replaces the
++brittle `error.message.includes("ConditionalCheckFailed")` string matching that
++`deletePractice` (`packages/data/src/repository/practice-repository.ts:38-44`) and
++`deleteReferral` (`referral-repository.ts:69-76`) use today. The difference between a
++contract and a coincidence.
++
++Existing delete methods are **left alone** — the TDD scopes no change to them, and
++they're covered by passing tests. Noted as a follow-up, not folded in.
++
++### 1.3 ElectroDB already removes GSI keys when a partition-key attribute is removed
++
++The TDD flags clearing `accountManager` (GSI3 PK) as "the one clear case worth an
++explicit test" (TDD:68) and implies bespoke handling. Verified `_getUpdatedKeys`
++(`:3475-3527`): it computes `removedKeyImpact` from removed attributes and pushes the
++affected index keys onto `deletedKeys`, which `:2564-2574` converts to
++`update.remove(indexKey)` — correctly skipping the table's own PK/SK.
++
++**Consequence**: `.remove(["accountManager"])` cleans up `GSI3PK`/`GSI3SK` unaided. Keep
++the TDD's test — it's valuable as a *verification of library behavior against LocalStack*
++— but write no workaround. The TDD's worry that clearing "must remove the index entry
++rather than leave a key formatted from an empty string" is already handled upstream.
++
++### 1.4 `IncompleteCompositeAttributes` has a documented escape hatch
++
++TDD:79 correctly identifies that changing a GSI partition key throws unless every
++composite for the affected access pattern is supplied. The error message itself
++(`:3355-3360`) names the fix: *"use the 'composite' chain method on update to supply the
++value for key formatting purposes."*
++
++Every index on both entities is `pk: [field], sk: [id]`, and `id` is always known from
++the route path. So `.composite({ id })` supplies the missing piece for any GSI-key patch.
++
++**Consequence**: patching `name`, `status`, `accountManager`, `practiceName`,
++`cleanReferrerName`, `referringProviderId`, or `fullName` is mechanical, not special-cased.
++
++### 1.5 `PatchFields` / `UpsertFields` already exist and are completely unused
++
++`packages/data/src/model/types.ts:164-199` defines `UpsertFields`, `PatchFields`, and
++`IdentityFields` — generics that derive "fields settable on update" from a model plus its
++ElectroDB entity, excluding auto-set keys. Grep across `packages/data/src`,
++`apps/api/src`, and `apps/jobs/**` finds **zero call sites**.
++
++**Consequence**: the exact type vocabulary this work needs was already built and never
++wired up. New repository signatures use
++`PatchFields<Practice, typeof PracticeEntity, "createdAt" | "updatedAt">` instead of
++inventing parallel hand-written input types.
++
++### 1.6 Nullable clearing: use `nullable: true`, not `type: [string, "null"]`
++
++TDD:66 specifies `type: [string, "null"]`. Both forms work; the repo has precedent for
++the other one, and mixing them is worse than either.
++
++Spiked against `ajv@8.18.0` with `{ strict: true }` (matching `server.ts:53`):
++
++| Form | Compiles (strict) | Accepts `null` | Rejects wrong type |
++|---|---|---|---|
++| `type: ["string","null"]` | yes | yes | yes (`must be string,null`) |
++| `nullable: true` | yes | yes | — |
++
++And `nullable: true` is already used on a **request** schema —
++`PracticeRow.accountManager` (`docs/openapi.yaml:1631-1634`) — generating
++`accountManager?: string \| null` (`apps/api/src/generated/types.ts:697`). The ingest
++path already round-trips nullable request fields through openapi-typescript correctly.
++
++**Decision**: follow in-repo precedent (`nullable: true`). It's an OAS 3.0 keyword in a
++3.1.1 document, which is a wart, but it demonstrably works through AJV *and*
++openapi-typescript here, and consistency with `PracticeRow` beats spec purism. Flagged
++for the reviewer rather than silently diverging from the TDD.
++
++### 1.7 The dev-dashboard has no test infrastructure at all
++
++`apps/dev-dashboard/package.json:15` — `"test": "vitest run --passWithNoTests"`. No
++`vitest.config.ts`, no `jsdom`/`happy-dom`, no `@testing-library/*`, no test file
++anywhere under `apps/dev-dashboard/`.
++
++**Consequence**: the TDD's UI guarantees — confirmation on destructive/replace ops
++(TDD:126), "UI should not imply permanence" (TDD:132), no PHI persisted (TDD:124),
++"Preview must not imply it verified opt-out status" (TDD:118) — have nothing to assert
++them. See §2.
++
++### 1.8 The dashboard does not use the generated SDK, and the SDK can't cover internal ops
++
++`apps/dev-dashboard` depends on `@pathccm/attribution-service-client-ts-axios`
++(`package.json:20`) but imports it nowhere; pages call raw axios paths
++(`PracticesIngest.tsx:52` — `client.post("/internal/practices/ingest", parsed, …)`).
++
++More decisively: `clients/attribution-service-client-ts-axios/openapi-config.yaml` sets
++`inputSpec: ../../docs/openapi.yaml` — **public spec only**. `detect-sdk-drift.yml`
++watches only `docs/openapi.yaml`.
++
++**Consequence**: the TDD's goal "every operation … reached through generated types"
++(TDD:19) cannot mean the axios SDK for internal operations. It means either (a) generate
++a second internal SDK, or (b) type the dashboard's calls against
++`apps/api/src/generated/internal-types.ts`. This plan takes **(b)** — the dashboard
++imports the generated `components["schemas"]` types, so a spec change breaks `tsc -b`
++in the dashboard. Recorded as a deviation from the literal TDD wording (§7).
++
++---
++
++## 2. Scope decision: UI testing
++
++The TDD's Capabilities are operator-facing ("An operator can create a practice, search
++existing ones by name, status, or account manager, open one to see its full stored
++state…"), so honest AC coverage implies UI tests. Per §1.7 the dashboard has zero test
++infrastructure.
++
++Rather than silently drop the UI ACs or silently expand scope, this plan:
++
++- Stands up **minimal** Vitest + jsdom + `@testing-library/react` in `apps/dev-dashboard`
++  as an explicit, separable phase (Phase 6), scoped to the four behaviors the TDD calls
++  out as consequential: destructive-op confirmation, impermanence warning,
++  no-PHI-persistence, and the opt-out caveat on preview.
++- Does **not** attempt broad component coverage of every form field.
++
++Smallest addition that makes the TDD's UI guarantees assertable. If you'd rather defer
++it, Phase 6 lifts out cleanly and every API-layer AC still holds.
++
++---
++
++## 3. Deviations from the TDD (all deliberate)
++
++| # | TDD says | Plan does | Why |
++|---|---|---|---|
++| 1 | Internal spec is unlinted (TDD:144); Open Q #2 asks whether to lint it | Treats it as already linted; holds new ops to zero new warnings | §1.1 — `package.json:11` already lints both |
++| 2 | Clear via `type: [string, "null"]` (TDD:66) | `nullable: true` | §1.6 — matches `PracticeRow`, verified through AJV + openapi-typescript |
++| 3 | "reached through generated types" (TDD:19) | Dashboard imports `internal-types.ts`; no internal axios SDK | §1.8 — SDK generator is public-spec-only |
++| 4 | Clearing GSI3 key "worth an explicit test" implying custom handling (TDD:68) | Test kept; no custom code | §1.3 — ElectroDB handles it |
++| 5 | UI behaviors asserted (TDD:118,124,126,132) | Requires new test infra (Phase 6) | §1.7 — none exists |
++
++---
++
++## 4. Acceptance criteria (EARS)
++
++Each requirement is testable and traced to a TDD line. `SHALL` is normative.
++
++### 4.1 Auth scheme correction — prerequisite for everything else
++
++Derived from TDD:83-98. Ships **first**, alone, so no new operation inherits a wrong
++contract.
++
++The internal spec declares `apiKeyAuth` as `type: apiKey, in: header, name: x-api-key`
++(`docs/openapi-internal.yaml:84-87`), but `apiKeyAuth` (`apps/api/src/security/api-key-auth.ts:6-21`)
++reads `request.headers.authorization` and requires `Bearer <key>`. The public spec gets
++it right (`docs/openapi.yaml:604-606`: `type: http, scheme: bearer`).
++
++- **AUTH-1**: WHERE `docs/openapi-internal.yaml` declares the `apiKeyAuth` security
++  scheme, the system SHALL declare it as `type: http, scheme: bearer`, matching
++  `docs/openapi.yaml:604-606` and the behavior of `api-key-auth.ts`.
++- **AUTH-2**: WHEN a request carries a valid key as `Authorization: Bearer <key>` to any
++  authenticated internal operation, the system SHALL authenticate it successfully.
++- **AUTH-3**: IF a request to an authenticated internal operation omits the
++  `Authorization` header, THEN the system SHALL respond `401` with body
++  `errorType: "AuthenticationError"`.
++- **AUTH-4**: IF a request presents a key not in the `API_KEYS` allowlist, THEN the
++  system SHALL respond `401` with `errorType: "AuthenticationError"`.
++- **AUTH-5**: IF a request presents an `Authorization` header whose scheme is not
++  `Bearer` or which does not split into exactly two space-separated parts, THEN the
++  system SHALL respond `401`.
++- **AUTH-6**: WHERE the internal spec declares `servers`, the system SHALL list
++  local (`http://localhost:3024`) and dev-int alongside the existing prod-int entry
++  (TDD:98).
++- **AUTH-7**: WHERE an operation is a CORS preflight (`options*`), the system SHALL
++  declare `security: []` and SHALL respond `204` without authentication.
++
++*Note*: AUTH-3/4/5 already hold at runtime (the handler is correct); these lock in
++behavior while the *declaration* changes, guarding against a regression where someone
++"fixes" the handler to match the old wrong spec.
++
++### 4.2 Capability: Manage practice records
++
++Derived from TDD:148-154. Entity: `Practice` (`packages/data/src/model/practice.ts`),
++fields `id`, `name`, `status`, `accountManager?`, `practiceEmail?`, `lastReferralDate?`,
++`createdAt` (readOnly), `updatedAt` (`watch: "*"`).
++
++**Create** — `POST /internal/practices`
++
++- **PC-1**: WHEN a create request supplies a valid body with an `id` that does not exist,
++  THEN the system SHALL persist the practice and respond `201` with the stored record
++  including server-assigned `createdAt` and `updatedAt`.
++- **PC-2**: IF a create request supplies an `id` that already exists, THEN the system
++  SHALL respond `409` with `errorType: "ConflictError"` and SHALL NOT modify the stored
++  record (TDD:59 — "rejected rather than silently overwriting").
++- **PC-3**: IF a create request omits any of `id`, `name`, or `status`, THEN the system
++  SHALL respond `422` with `errorType: "UnprocessableContentError"`.
++- **PC-4**: IF a create request supplies a `status` outside the `PracticeStatus` enum
++  (`SOLD`, `ONBOARDING`, `STALLED_IN_ONBOARDING`, `CHURNED`, `OTHER`), THEN the system
++  SHALL respond `422`.
++- **PC-5**: IF a create request supplies `createdAt` or `updatedAt`, THEN the system
++  SHALL respond `422` (both are server-managed; `additionalProperties: false`).
++- **PC-6**: WHEN a practice is created with `accountManager` present, THEN the system
++  SHALL make it retrievable via the GSI3 account-manager lookup.
++
++**Read** — `GET /internal/practices/{practiceId}`, `GET /internal/practices`
++
++- **PR-1**: WHEN a detail request names an existing `practiceId`, THEN the system SHALL
++  respond `200` with every stored attribute, including absent optional fields omitted
++  rather than null.
++- **PR-2**: IF a detail request names a `practiceId` with no stored record, THEN the
++  system SHALL respond `404` with `errorType: "NotFoundError"`.
++- **PR-3**: WHEN a list request supplies no filter, THEN the system SHALL respond `200`
++  with a page of practices and a `nextCursor` when more results exist.
++- **PR-4**: WHEN a list request supplies exactly one of `name`, `status`, or
++  `accountManager`, THEN the system SHALL serve it from the corresponding GSI
++  (`byName`/GSI2, `byStatus`/GSI1, `byAccountManager`/GSI3) rather than a table scan.
++- **PR-5**: WHILE more results remain, the system SHALL return a `nextCursor` that, when
++  replayed, returns the following page without repeating or skipping records.
++- **PR-6**: IF a list request supplies a `limit` outside 1–100, THEN the system SHALL
++  respond `422`.
++- **PR-7**: WHERE `name` and `accountManager` GSI keys use `casing: "upper"`
++  (`practice.ts:93`, `:110`), the system SHALL match those lookups case-insensitively.
++
++**Update** — `PATCH /internal/practices/{practiceId}`
++
++- **PU-1**: WHEN a patch supplies a subset of mutable fields, THEN the system SHALL apply
++  only those fields and SHALL leave every other stored attribute unchanged (TDD:60).
++- **PU-2**: IF a patch names a `practiceId` with no stored record, THEN the system SHALL
++  respond `404` and SHALL NOT create one (`patch()`'s `attribute_exists` condition — no
++  accidental upsert).
++- **PU-3**: IF a patch body includes `id`, THEN the system SHALL respond `422` — `id` is
++  the primary-key composite and immutable (TDD:72: "update must reject an attempted `id`
++  change rather than silently ignoring it").
++- **PU-4**: WHEN a patch sets an optional field to `null`, THEN the system SHALL remove
++  the attribute so it is genuinely absent, not stored as a literal null (TDD:64-67).
++- **PU-5**: WHEN a patch clears `accountManager` to `null`, THEN the system SHALL remove
++  the GSI3 index entry, and the practice SHALL NOT appear in any account-manager lookup
++  (TDD:68).
++- **PU-6**: WHEN a patch changes a GSI partition key — `name` (GSI2), `status` (GSI1), or
++  `accountManager` (GSI3) — THEN the system SHALL regenerate that index's keys so the
++  record is found under the new value and not the old.
++- **PU-7**: WHEN a patch omits a field, THEN the system SHALL leave it untouched;
++  omission SHALL NOT be interpreted as a clear (TDD:60 — the explicit contrast with
++  `upsertReferral`'s replace semantics).
++- **PU-8**: WHEN any patch succeeds, THEN the system SHALL advance `updatedAt` and SHALL
++  leave `createdAt` unchanged.
++- **PU-9**: IF a patch supplies an empty body `{}`, THEN the system SHALL respond `422`
++  rather than issuing a no-op write.
++
++**Delete** — `DELETE /internal/practices/{practiceId}`
++
++- **PD-1**: WHEN a delete names an existing `practiceId`, THEN the system SHALL remove
++  the record and respond `204`.
++- **PD-2**: IF a delete names a `practiceId` with no stored record, THEN the system SHALL
++  respond `404`.
++- **PD-3**: WHEN a single practice is deleted, THEN the system SHALL leave all other
++  practices intact — distinct from `deleteAllPractices` (TDD:154).
++- **PD-4**: WHERE `DELETE /internal/practices` (delete-all) already exists, the system
++  SHALL keep its current path, `operationId`, and `204` behavior unchanged.
++
++**Ingest isolation**
++
++- **PI-1**: WHERE `upsertPractice` (`practice-repository.ts:7-21`) serves the Hex ingest,
++  the system SHALL leave its signature and merge semantics unchanged, and
++  `POST /internal/practices/ingest` SHALL keep passing its existing tests (TDD:55).
++
++### 4.3 Capability: Manage referral records
++
++Derived from TDD:156-162. Entity: `Referral` (`packages/data/src/model/referral.ts`) —
++7 required fields (`id`, `leadId`, `fullName`, `cleanReferrerName`,
++`referringProviderId`, `practiceName`, `createdDate`, `therapyOrPsychLead`) and
++12 optional ones. **Carries PHI** (`fullName`, `mobile`, `email`, stage data).
++
++**Create** — `POST /internal/pcp-referrals`
++
++- **RC-1**: WHEN a create request supplies a valid body with a new `id`, THEN the system
++  SHALL persist the referral and respond `201` with the stored record.
++- **RC-2**: IF a create request supplies an existing `id`, THEN the system SHALL respond
++  `409` with `errorType: "ConflictError"` and SHALL NOT modify the stored record.
++- **RC-3**: IF a create request omits any required field, THEN the system SHALL respond
++  `422` naming the offending field in `issues`.
++- **RC-4**: IF a create request supplies `therapyOrPsychLead` outside `LeadType`
++  (`PSYCH_ONLY`, `THERAPY_ONLY`, `BOTH`), or `therapyLeadStage`/`psychLeadStage` outside
++  `LeadStage` (`LEAD`, `CONTACT`, `HOLD`, `REGISTERED`, `SCHEDULED`, `PATIENT`), THEN the
++  system SHALL respond `422`.
++- **RC-5**: WHEN a referral is created, THEN the system SHALL make it retrievable under
++  all four GSIs — `practiceName` (GSI1), `cleanReferrerName` (GSI2), `fullName` (GSI3),
++  `referringProviderId` (GSI4).
++
++**Read** — `GET /internal/pcp-referrals/{referralId}`, `GET /internal/pcp-referrals`
++
++- **RR-1**: WHEN a detail request names an existing `referralId`, THEN the system SHALL
++  respond `200` with every stored attribute including lead type and both stage fields
++  (TDD:160).
++- **RR-2**: IF a detail request names an unknown `referralId`, THEN the system SHALL
++  respond `404`.
++- **RR-3**: WHEN a list request supplies exactly one of `practiceName`,
++  `cleanReferrerName`, `referringProviderId`, or `fullName`, THEN the system SHALL serve
++  it from the matching GSI.
++- **RR-4**: IF a list request supplies no filter, THEN the system SHALL respond `422` —
++  unfiltered referral listing is not offered, since a table scan over PHI records has no
++  operator use case the four lookups don't cover.
++- **RR-5**: WHILE more results remain, the system SHALL return a replayable `nextCursor`
++  (TDD:160 — "page through results").
++- **RR-6**: WHERE GSI1/GSI2/GSI3 use `casing: "upper"` but GSI4
++  (`referringProviderId`) uses `casing: "none"` (`referral.ts:131,148,166,182`), the
++  system SHALL match the first three case-insensitively and GSI4 case-sensitively.
++
++**Update** — `PATCH /internal/pcp-referrals/{referralId}`
++
++- **RU-1**: WHEN a patch supplies one field, THEN the system SHALL leave all 12 optional
++  fields and every other stored attribute untouched. This is the headline guarantee:
++  "editing one stage field must not disturb `mobile`, `email`, `networkName`,
++  `insuranceCarrier`, or the rest" (TDD:162).
++- **RU-2**: IF a patch names an unknown `referralId`, THEN the system SHALL respond `404`
++  and SHALL NOT create a record.
++- **RU-3**: IF a patch body includes `id`, THEN the system SHALL respond `422`.
++- **RU-4**: WHEN a patch sets an optional field to `null`, THEN the system SHALL remove
++  that attribute and SHALL leave the other 11 optional fields unchanged.
++- **RU-5**: WHEN a patch changes a GSI partition key — `practiceName`,
++  `cleanReferrerName`, `referringProviderId`, or `fullName` — THEN the system SHALL
++  regenerate that index so the referral is found under the new value and not the old.
++- **RU-6**: WHEN a patch succeeds, THEN the system SHALL advance `updatedAt` and leave
++  `createdAt` unchanged.
++- **RU-7**: IF a patch supplies an empty body `{}`, THEN the system SHALL respond `422`.
++
++**Delete** — `DELETE /internal/pcp-referrals/{referralId}`
++
++- **RD-1**: WHEN a delete names an existing `referralId`, THEN the system SHALL remove it
++  and respond `204`.
++- **RD-2**: IF a delete names an unknown `referralId`, THEN the system SHALL respond `404`.
++- **RD-3**: WHEN one referral is deleted, THEN the system SHALL leave all others intact.
++- **RD-4**: WHERE `DELETE /internal/pcp-referrals` (delete-all) already exists, the
++  system SHALL keep its path, `operationId`, and `204` behavior unchanged.
++
++**PHI and impermanence**
++
++- **RP-1**: WHERE any referral field flows through the dashboard, the system SHALL NOT
++  persist request or response bodies to `localStorage`, `IndexedDB`, or logs
++  (`apps/dev-dashboard/README.md:83-84`, TDD:124).
++- **RP-2**: WHERE the dashboard offers referral edit or delete, the system SHALL require
++  explicit operator confirmation before submitting (TDD:126 — "referral mutation is the
++  highest-consequence surface in this document").
++- **RP-3**: WHERE the dashboard presents a referral edit form, the system SHALL state
++  that edits are overwritten by the next Hex ingest run (TDD:132 — "the UI should not
++  imply permanence").
++- **RP-4**: WHERE `upsertReferral` (`referral-repository.ts:22-52`) serves the Hex
++  ingest, the system SHALL leave its replace semantics unchanged and its existing tests
++  passing (TDD:55).
++
++### 4.4 Capability: Preview the monthly batch cohort
++
++Derived from TDD:100-120, 164-168. Read-only. Requires extracting cohort logic and the
++pure guard predicates into a shared workspace package (TDD:110).
++
++**Extraction**
++
++- **CX-1**: WHERE `evaluateGuards`, `hasPracticeContactEmail`, and `isPracticeOptedOut`
++  (`apps/jobs/batch-runner/src/services/guards.ts:7-26`) are pure functions of a
++  `Practice`, the system SHALL relocate them to a shared workspace package consumed by
++  both `apps/api` and `apps/jobs/batch-runner`, so preview and batch cannot drift
++  (TDD:110 — duplication into `apps/api` "explicitly rejected").
++- **CX-2**: WHERE `SkipReason` (`services/skip-reason.ts`) is a plain enum, the system
++  SHALL relocate it to the shared package with all three members unchanged
++  (`NO_PRACTICE_CONTACT_EMAIL`, `OPTED_OUT`, `BELOW_REFERRAL_FLOOR`).
++- **CX-3**: WHERE `emitPracticeSkipped` (`guards.ts:31-38`) emits Datadog counters, the
++  system SHALL leave it in `apps/jobs/batch-runner` and SHALL NOT move it into the
++  shared package (TDD:107,112 — "a preview must not move batch counters").
++- **CX-4**: WHEN the extraction lands, THEN `apps/jobs/batch-runner` SHALL import the
++  predicates from the shared package, and its existing tests
++  (`__tests__/services/guards.test.ts`, `cohort.test.ts`, `loop.test.ts`,
++  `metrics-emission.test.ts`, `outcome.test.ts`) SHALL pass unchanged.
++- **CX-5**: WHERE `resolveCohort` (`services/cohort.ts:8-35`) interleaves selection with
++  two fire-and-forget Datadog emissions (`:22`, `:31`), the system SHALL extract the
++  selection logic such that a caller can resolve the cohort **without** emitting
++  `COHORT.PAGE_FETCHED` or `COHORT.SIZE`, while batch-runner keeps emitting both.
++- **CX-6**: WHERE the shared package is created, the system SHALL follow the
++  `/add-package` checklist — own workspace under `packages/`, not a `common/` umbrella
++  (TDD:110; `CLAUDE.md` "Adding a New Package") — including `Dockerfile` manifest/source/dist
++  wiring and the `CLAUDE.md` architecture-tree entry.
++
++**Preview endpoint** — `GET /internal/practice-reports/cohort-preview`
++
++- **CP-1**: WHEN a preview request is made, THEN the system SHALL select practices with
++  status `SOLD` via `listPracticesByStatus`, matching `resolveCohort`'s selection exactly
++  (TDD:106).
++- **CP-2**: WHEN the cohort is resolved, THEN the system SHALL evaluate the same guards
++  as the batch for each practice and report each as proceed or skip with its
++  `SkipReason` (TDD:112,168).
++- **CP-3**: WHEN a practice has no non-blank `practiceEmail`, THEN the system SHALL
++  report it skipped with reason `NO_PRACTICE_CONTACT_EMAIL` (`guards.ts:7-9,22-24`).
++- **CP-4**: WHEN a preview is requested, THEN the system SHALL respond `200` with the
++  total cohort size, the count that would proceed, and the skipped entries with reasons.
++- **CP-5**: WHILE a preview runs, the system SHALL NOT render a PDF, write a
++  `PracticeReportPublished` ledger row, stage anything to S3, send email, or emit any
++  batch metric (TDD:112 — read-only).
++- **CP-6**: WHERE `isPracticeOptedOut` reads `optedOut`, which is **not** a declared
++  attribute on `PracticeEntity` (`services/types.ts:4-5`, `TODO(NEV-1412)` closed
++  *Wont fix*), the system SHALL report `OPTED_OUT` for zero practices and SHALL surface a
++  caveat that opt-out status was not verified (TDD:114-118 — "Preview must not imply it
++  verified opt-out status").
++- **CP-7**: WHERE `optedOut` is not a stored attribute, the system SHALL NOT offer it as
++  an editable field on the practice edit surface (TDD:120).
++- **CP-8**: WHEN a cohort page is fetched during preview, THEN the system SHALL paginate
++  to completion so the preview covers the whole cohort, not just the first page.
++
++### 4.5 Cross-cutting: spec-as-contract, auth matrix, lint
++
++Derived from TDD:134-144, copying `pathccm/employer-backend`'s good patterns.
++
++- **X-1**: WHERE every operation the dashboard performs, the system SHALL declare it in
++  `docs/openapi-internal.yaml` and reach it through generated types — no hand-rolled
++  paths, no dashboard-only operations (TDD:19,142).
++- **X-2**: WHEN the server is running, THEN `GET /internal-documentation/json` SHALL list
++  every new `operationId`, so missing glue wiring fails a test rather than 404-ing in a
++  browser (TDD:140).
++- **X-3**: WHERE every `[method, url]` pair on the internal surface, the system SHALL
++  return `401` for a missing key and `401` for a wrong key, asserted via a `test.each`
++  matrix on the `errorType` discriminator (TDD:139).
++- **X-4**: WHEN `pnpm openapi-lint` runs, THEN the internal spec SHALL report no more
++  warnings than the 6 present at baseline (§1.1) — every new string carries `maxLength`,
++  every array `maxItems`, every integer `minimum`/`maximum`.
++- **X-5**: WHERE new operations are added, the system SHALL follow the repo's OpenAPI
++  conventions: kebab-case paths, camelCase path params (`{practiceId}` — not
++  kebab-case, per the `fastify-openapi-glue` `{(\w+)}` regex limitation), PascalCase
++  schemas, camelCase properties, SCREAMING_SNAKE_CASE enum values (`CLAUDE.md`).
++- **X-6**: WHEN `task api` regenerates types, THEN `internal-types.ts` and
++  `internal-route-handler-types.ts` SHALL be committed in the same change as the spec
++  edit, and `tsc --build` SHALL pass across the workspace.
++- **X-7**: WHERE the public spec's two `/internal/*/ingest` declarations live
++  (`docs/openapi.yaml:523,558`), the system SHALL leave them in place — moving them is
++  called out as an open question, not this work (TDD:32,187).
++- **X-8**: WHERE new operations need CORS preflight for the browser dashboard, the system
++  SHALL declare an `options` operation per new path with `security: []`, matching the
++  existing convention, since `corsOptionsDelegate` (`apps/api/src/cors.ts:61-67`) allows
++  the local dashboard origin on `-int` hosts.
++- **X-9**: WHERE a `409` response is introduced, the system SHALL add a `ConflictError`
++  schema and a `ConflictError` class following the existing `errors.ts` pattern
++  (subclass `ResponseError`, `statusCode` 409, `errorType` discriminator) — no `409`
++  exists anywhere in the repo today.
++
++---
++
++## 5. Derived test cases
++
++Repository tests hit LocalStack DynamoDB (`clearAllItems` in `afterEach`, per
++`packages/data/src/__tests__/repository/practice-repository.test.ts:17-26`). Route tests
++use `useServerHelper()` + `server.inject()` with `authorization: "Bearer valid-test-key"`
++and `vi.mock("../../config")` (per `__tests__/routes/internal-practices-ingest.test.ts`).
++
++### 5.1 `packages/data` — repository layer
++
++`__tests__/repository/practice-repository.test.ts` (extend):
++
++- [ ] `createPractice` persists a new practice with `createdAt`/`updatedAt` → PC-1
++- [ ] `createPractice` rejects a duplicate `id` without mutating the stored record → PC-2
++- [ ] `createPractice` makes the record findable via `listPracticesByAccountManager` → PC-6
++- [ ] `patchPractice` applies one field and leaves the others byte-identical → PU-1
++- [ ] `patchPractice` on a missing `id` reports not-found and creates nothing → PU-2
++- [ ] `patchPractice` with `practiceEmail: null` removes the attribute (absent, not null) → PU-4
++- [ ] `patchPractice` clearing `accountManager` drops the GSI3 entry; AM lookup misses → PU-5
++- [ ] `patchPractice` changing `name` moves the GSI2 partition (old miss, new hit) → PU-6
++- [ ] `patchPractice` changing `status` moves the GSI1 partition → PU-6
++- [ ] `patchPractice` advances `updatedAt`, preserves `createdAt` → PU-8
++- [ ] `patchPractice` omitting `practiceEmail` leaves the stored value in place —
++      omission is not a clear (the contrast with `upsertReferral`) → PU-7
++- [ ] `hasPracticeContactEmail` treats whitespace-only `practiceEmail` as absent → CP-3
++
++`__tests__/repository/referral-repository.test.ts` (extend):
++
++- [ ] `createReferral` persists all required + supplied optional fields → RC-1
++- [ ] `createReferral` rejects a duplicate `id` → RC-2
++- [ ] `createReferral` is findable under all four GSIs → RC-5
++- [ ] **`patchReferral` on one stage field leaves all 12 optional fields intact** → RU-1
++      *(the headline guarantee — assert the full stored object, not field-by-field)*
++- [ ] `patchReferral` with `mobile: null` removes only `mobile` → RU-4
++- [ ] `patchReferral` changing `practiceName` moves GSI1 → RU-5
++- [ ] `patchReferral` changing `fullName` moves GSI3 → RU-5
++- [ ] `patchReferral` on a missing `id` creates nothing → RU-2
++- [ ] existing `upsertPractice`/`upsertReferral` suites still pass untouched → PI-1, RP-4
++
++### 5.2 `apps/api` — routes
++
++`__tests__/routes/internal-practices-crud.test.ts` (new):
++
++- [ ] `POST` valid → `201` + stored body → PC-1
++- [ ] `POST` duplicate `id` → `409` / `ConflictError` → PC-2
++- [ ] `POST` missing `name` → `422` → PC-3
++- [ ] `POST` bad `status` enum → `422` → PC-4
++- [ ] `POST` with `createdAt` supplied → `422` → PC-5
++- [ ] `GET` detail existing → `200`, absent optionals omitted → PR-1
++- [ ] `GET` detail unknown → `404` / `NotFoundError` → PR-2
++- [ ] `GET` list unfiltered → `200` + page → PR-3
++- [ ] `GET` list by each of name/status/accountManager → `200` → PR-4
++- [ ] `GET` list `limit=0` and `limit=101` → `422` → PR-6
++- [ ] `GET` list name lookup is case-insensitive → PR-7
++- [ ] cursor replay returns page 2 with no repeats/gaps → PR-5
++- [ ] `PATCH` partial → `200`, untouched fields preserved → PU-1
++- [ ] `PATCH` unknown id → `404` → PU-2
++- [ ] `PATCH` body containing `id` → `422` → PU-3
++- [ ] `PATCH` `{"practiceEmail": null}` → field absent on re-read → PU-4
++- [ ] `PATCH` `{}` → `422` → PU-9
++- [ ] `DELETE` existing → `204` → PD-1
++- [ ] `DELETE` unknown → `404` → PD-2
++- [ ] `DELETE` one leaves siblings intact → PD-3
++- [ ] `DELETE /internal/practices` (all) still `204` → PD-4
++
++`__tests__/routes/internal-pcp-referrals-crud.test.ts` (new):
++
++- [ ] `POST` valid → `201` → RC-1
++- [ ] `POST` duplicate `id` → `409` → RC-2
++- [ ] `POST` missing a required field → `422` naming it in `issues` → RC-3
++- [ ] `POST` bad `therapyOrPsychLead` / `therapyLeadStage` enum → `422` → RC-4
++- [ ] `GET` detail existing → `200` incl. lead type + both stage fields → RR-1
++- [ ] `GET` detail unknown → `404` → RR-2
++- [ ] `GET` list by each of practiceName/cleanReferrerName/referringProviderId/fullName → RR-3
++- [ ] `GET` list with no filter → `422` → RR-4
++- [ ] cursor replay pages without repeats/gaps → RR-5
++- [ ] `GET` list by `referringProviderId` is case-**sensitive** (GSI4 `casing: "none"`);
++      the other three are case-insensitive → RR-6
++- [ ] **`PATCH` one stage field over a fully-populated referral → every other field
++      byte-identical** → RU-1
++- [ ] `PATCH` unknown id → `404`, creates nothing → RU-2
++- [ ] `PATCH` body containing `id` → `422` → RU-3
++- [ ] `PATCH` `{"mobile": null}` → only `mobile` absent → RU-4
++- [ ] `PATCH` `{}` → `422` → RU-7
++- [ ] `PATCH` succeeds → `updatedAt` advanced, `createdAt` unchanged → RU-6
++- [ ] `DELETE` existing → `204` → RD-1
++- [ ] `DELETE` unknown → `404` → RD-2
++- [ ] `DELETE` one leaves siblings intact → RD-3
++- [ ] `DELETE /internal/pcp-referrals` (all) still `204` → RD-4
++
++`__tests__/routes/internal-cohort-preview.test.ts` (new):
++
++- [ ] preview returns only `SOLD` practices → CP-1
++- [ ] practice without `practiceEmail` reported skipped `NO_PRACTICE_CONTACT_EMAIL` → CP-3
++- [ ] practice with valid email reported as proceeding → CP-2
++- [ ] response carries cohort size, proceed count, skip list → CP-4
++- [ ] **no Datadog counter/gauge emitted during preview** (spy on `stats.sendCounter`
++      and `sendGauge`, assert zero batch-metric calls) → CP-5
++- [ ] no ledger row written, no S3 call, no email → CP-5
++- [ ] `OPTED_OUT` count is zero and the caveat field is present → CP-6
++- [ ] cohort spanning multiple pages is fully enumerated → CP-8
++
++`__tests__/routes/internal-auth-matrix.test.ts` (new):
++
++- [ ] `test.each` over every internal `[method, url]`: no header → `401` /
++      `AuthenticationError` → AUTH-3, X-3
++- [ ] `test.each` same pairs: wrong key → `401` → AUTH-4, X-3
++- [ ] non-`Bearer` scheme → `401` → AUTH-5
++- [ ] valid `Bearer` key → not `401` → AUTH-2
++- [ ] every `options` operation → `204` without auth → AUTH-7
++
++`__tests__/routes/internal-spec-contract.test.ts` (new):
++
++- [ ] `GET /internal-documentation/json` lists every new `operationId` → X-2
++- [ ] served internal spec declares `apiKeyAuth` as `type: http, scheme: bearer` → AUTH-1
++- [ ] served internal spec lists local, dev-int, prod-int servers → AUTH-6
++
++### 5.3 Shared cohort package
++
++`packages/<cohort-pkg>/src/__tests__/guards.test.ts` (moved from batch-runner):
++
++- [ ] `evaluateGuards` table-driven cases port over unchanged → CX-1, CX-4
++- [ ] `SkipReason` retains all three members → CX-2
++- [ ] package exports no Datadog/observability dependency → CX-3
++
++`apps/jobs/batch-runner` (existing, must stay green):
++
++- [ ] `guards.test.ts`, `cohort.test.ts`, `loop.test.ts`, `metrics-emission.test.ts`,
++      `outcome.test.ts` all pass against the shared imports → CX-4
++- [ ] batch-runner still emits `COHORT.PAGE_FETCHED` and `COHORT.SIZE` → CX-5
++
++### 5.4 Dashboard (Phase 6, see §2)
++
++- [ ] destructive referral action requires confirmation before firing a request → RP-2
++- [ ] referral edit form shows the ingest-overwrite warning → RP-3
++- [ ] no response body reaches `localStorage`/`sessionStorage` (spy on setters) → RP-1
++- [ ] cohort preview view renders the opt-out caveat → CP-6
++- [ ] practice edit form exposes no `optedOut` control → CP-7
++
++---
++
++## 6. Implementation phases
++
++Ordered so each phase is independently reviewable and leaves the tree green. Phase 1
++ships alone and first (TDD:96 — "corrected before new operations are added").
++
++### Phase 1 — Auth scheme + servers correction
++
++Files: `docs/openapi-internal.yaml`, generated types, new contract test.
++
++- [ ] Change `apiKeyAuth` to `type: http, scheme: bearer` with the description mirroring
++      `docs/openapi.yaml:604-611` → AUTH-1
++- [ ] Add local (`http://localhost:3024`) and dev-int `servers` entries → AUTH-6
++- [ ] `task api` → commit regenerated `internal-types.ts` + `internal-route-handler-types.ts` → X-6
++- [ ] Add `internal-spec-contract.test.ts` asserting the served scheme and servers
++- [ ] Add `internal-auth-matrix.test.ts` over the two existing operations (extended in
++      later phases as operations land) → X-3
++- [ ] `pnpm openapi-lint` — confirm still 6 warnings, no new ones → X-4
++
++**Why alone**: it's the one change that alters an existing published contract. Reviewable
++in isolation, and Swagger UI "Try it out" against `/internal-documentation` starts
++working, which makes every later phase manually verifiable.
++
++### Phase 2 — Data layer: create + patch for both entities
++
++Files: `packages/data/src/repository/{practice,referral}-repository.ts`,
++`repository/types.ts`, `errors.ts`, repository tests.
++
++- [ ] Add `ConflictError` to `packages/data/src/errors.ts` (mirrors the existing
++      `NotFoundError` shape) → X-9
++- [ ] `createPractice` / `createReferral` via ElectroDB `create()` +
++      `.go({ returnOnConditionCheckFailure: true })`, mapping `rejected` → `ConflictError` → PC-2, RC-2, §1.2
++- [ ] `patchPractice` / `patchReferral` via `patch()`, splitting the input into
++      set-fields and null-fields (`.remove([...])`), and `.composite({ id })` when a GSI
++      partition key changes → PU-1…PU-8, RU-1…RU-6, §1.4
++- [ ] Type inputs with the existing, unused `PatchFields` / `IdentityFields` generics
++      from `model/types.ts:164-199` → §1.5
++- [ ] Extend `IPracticeRepository` / `IReferralRepository` in `repository/types.ts`
++- [ ] Write §5.1 tests, including the GSI-migration and null-clearing cases
++- [ ] Leave `upsertPractice` / `upsertReferral` and both `delete*` methods untouched → PI-1, RP-4
++
++**Risk**: §1.3 and §1.4 are read from ElectroDB source, not yet exercised against
++LocalStack. The GSI-clearing test (PU-5) and GSI-migration tests (PU-6, RU-5) are the
++first place a wrong reading surfaces — write those before the route layer depends on them.
++
++### Phase 3 — Practice CRUD API
++
++Files: `docs/openapi-internal.yaml`, `apps/api/src/routes/internal/practices.ts`,
++`apps/api/src/service/practice-service.ts`, `apps/api/src/errors.ts`, route tests.
++
++- [ ] Add `ConflictError` class + `ConflictErrorResponse`/`ConflictError` schema to the
++      internal spec and `apps/api/src/errors.ts` → X-9
++- [ ] Declare `POST /internal/practices`, `GET /internal/practices`,
++      `GET|PATCH|DELETE /internal/practices/{practiceId}` with `options` siblings → X-1, X-5, X-8
++- [ ] Nullable optional fields via `nullable: true` (§1.6); `additionalProperties: false`
++      so `id`/`createdAt` in a patch body 422s → PU-3, PC-5
++- [ ] `task api`; implement handlers against generated route-handler types
++- [ ] Service functions delegating to the repository; map `ConflictError` → 409,
++      not-found → 404
++- [ ] Write §5.2 practice route tests; extend the auth matrix with the new pairs
++- [ ] `pnpm openapi-lint` → no new warnings → X-4
++
++*Naming check*: the spec already has a public `getPractice`/`listPractices`
++(`docs/openapi.yaml:82,194`). Internal `operationId`s must not collide across the two
++glue registrations — use `createPractice`, `getInternalPractice`, `listInternalPractices`,
++`updatePractice`, `deletePractice`. Verify at the `/internal-documentation/json`
++contract test (X-2).
++
++### Phase 4 — Referral CRUD API
++
++Same shape as Phase 3 for `/internal/pcp-referrals`, plus:
++
++- [ ] All 12 optional fields declared nullable → RU-4
++- [ ] Enum-constrained `therapyOrPsychLead`, `therapyLeadStage`, `psychLeadStage` → RC-4
++- [ ] Filter-required list validation → RR-4
++- [ ] Write §5.2 referral route tests, leading with the RU-1 "touch nothing else" case
++
++### Phase 5 — Shared cohort package + preview endpoint
++
++- [ ] `/add-package` for the shared package (own workspace, not `common/`; Dockerfile
++      manifest+source+dist wiring; `CLAUDE.md` tree entry) → CX-6
++- [ ] Move `guards.ts` pure predicates + `skip-reason.ts` + `PracticeWithGuardFields` in;
++      leave `emitPracticeSkipped` in batch-runner → CX-1, CX-2, CX-3
++- [ ] Split cohort resolution from metric emission so preview resolves without emitting → CX-5
++- [ ] Repoint batch-runner imports; confirm its five test files pass unchanged → CX-4
++- [ ] Add `@attribution-service/<pkg>` to `apps/api/package.json`; `pnpm install`
++- [ ] Declare + implement `GET /internal/practice-reports/cohort-preview` → CP-1…CP-8
++- [ ] Preview response carries an explicit opt-out caveat field → CP-6
++- [ ] Write §5.2 preview tests, including the zero-batch-metrics assertion
++
++### Phase 6 — Dashboard pages (separable, see §2)
++
++- [ ] Stand up Vitest + jsdom + `@testing-library/react` in `apps/dev-dashboard`
++      (`vitest.config.ts`, drop `--passWithNoTests`) → §1.7
++- [ ] `PracticeList` / `PracticeDetail` / `CreatePracticeForm` + delete-confirm dialog;
++      same triplet for referrals (TDD:138 — one triplet per entity, not one page per endpoint)
++- [ ] Cohort preview page (read-only) with the opt-out caveat rendered → CP-6
++- [ ] Type all calls against `apps/api/src/generated/internal-types.ts` `components["schemas"]` → X-1, §1.8
++- [ ] Confirmation gate on referral edit/delete → RP-2
++- [ ] Ingest-overwrite warning on referral edit → RP-3
++- [ ] No `optedOut` control on the practice form → CP-7
++- [ ] Write §5.4 tests
++- [ ] Confirm `apps/dev-dashboard/**` stays out of the Dockerfile and in
++      `deploy-eks.yml` `paths-ignore` (TDD:30)
++
++---
++
++## 7. Open questions carried forward
++
++From TDD:183-191, with a recommendation each. None block Phase 1–2.
++
++| TDD open question | Recommendation |
++|---|---|
++| Move the two `/internal/*/ingest` ops from public → internal spec? | **No, not here.** Breaking change to a published spec with a live Hex caller. X-7 keeps them put. |
++| Add the internal spec to Spectral linting? | **Already done** — §1.1. Question is closed; X-4 keeps it clean. |
++| Should referral create validate like Hex ingest, or looser for fixtures? | **Same validation.** Looser input invites fixtures the batch can't process; RC-3/RC-4 assume parity. |
++| Should cohort preview accept status/AM filters? | **No filters in v1.** CP-1 mirrors `resolveCohort` exactly; a filter makes preview diverge from what it predicts. |
++| Page size 25, and server- vs client-side pagination? | **Server-side, `limit` 1–100, default 25.** Matches repository defaults; PR-6 bounds it. Referrals carry PHI — don't fetch-and-filter whole sets into the browser. |
++
++Additional questions this plan surfaced:
++
++- **`nullable: true` vs `type: [x, "null"]`** — plan picks the former for consistency
++  (§1.6, deviation #2). Reviewer may prefer strict 3.1 and a separate sweep of the
++  public spec's existing `nullable` usages.
++- **Phase 6 scope** — is standing up dashboard test infrastructure in scope, or does the
++  UI ship untested for now? (§2)
++- **`deletePractice`/`deleteReferral` string-matched conditional checks** — noted in
++  §1.2 as fragile; deliberately not fixed here. Worth a follow-up ticket.
+diff --git a/.spectral.yaml b/.spectral.yaml
+index be9ef1fa..4cd2059e 100644
+--- a/.spectral.yaml
++++ b/.spectral.yaml
+@@ -173,3 +173,7 @@ overrides:
+       - "openapi.yaml#/servers/0"
+     rules:
+       owasp:api8:2023-no-server-http: "off"
++  - files:
++      - "openapi-internal.yaml#/servers/0"
++    rules:
++      owasp:api8:2023-no-server-http: "off"
+diff --git a/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+new file mode 100644
+index 00000000..e323280d
+--- /dev/null
++++ b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+@@ -0,0 +1,156 @@
++import { beforeAll, describe, expect, test, vi } from "vitest";
++import { useServerHelper } from "../util";
++
++vi.mock("../../config");
++vi.mock("../../service/pcp-referrals-service", () => ({
++  deleteAllReferrals: vi.fn().mockResolvedValue(0),
++}));
++vi.mock("../../service/practice-service", () => ({
++  deleteAllPractices: vi.fn().mockResolvedValue(0),
++  ingestPractices: vi.fn().mockResolvedValue({ upserted: 0, errors: 0 }),
++}));
++
++const VALID_KEY = "Bearer valid-test-key";
++
++const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
++
++type Operation = { method: string; url: string };
++
++/**
++ * Derived from the served spec rather than hardcoded, so an operation added in a
++ * later phase is covered by this matrix the moment it is declared.
++ */
++const authenticated: Operation[] = [];
++const preflight: Operation[] = [];
++
++describe("internal auth matrix", () => {
++  const serverHelper = useServerHelper();
++
++  beforeAll(async () => {
++    const res = await serverHelper
++      .getServer()
++      .inject({ method: "GET", url: "/internal-documentation/json" });
++    const spec = res.json() as {
++      security?: Record<string, string[]>[];
++      paths?: Record<string, Record<string, { security?: Record<string, string[]>[] }>>;
++    };
++    const specWideSecurity = spec.security ?? [];
++
++    for (const [path, methods] of Object.entries(spec.paths ?? {})) {
++      for (const [method, operation] of Object.entries(methods)) {
++        // A path item may carry a shared `parameters` array alongside its operations.
++        if (!HTTP_METHODS.has(method)) continue;
++
++        const security = operation.security ?? specWideSecurity;
++        const target = { method: method.toUpperCase(), url: path };
++        if (security.length === 0) {
++          preflight.push(target);
++        } else {
++          authenticated.push(target);
++        }
++      }
++    }
++
++    expect(authenticated.length).toBeGreaterThan(0);
++    expect(preflight.length).toBeGreaterThan(0);
++  });
++
++  test("discovers the internal surface from the spec", () => {
++    expect(authenticated.map((o) => `${o.method} ${o.url}`).sort()).toEqual([
++      "DELETE /internal/pcp-referrals",
++      "DELETE /internal/practices",
++      "DELETE /internal/practices/{practiceId}",
++      "GET /internal/practices",
++      "GET /internal/practices/{practiceId}",
++      "PATCH /internal/practices/{practiceId}",
++      "POST /internal/practices",
++    ]);
++    expect(preflight.map((o) => `${o.method} ${o.url}`).sort()).toEqual([
++      "OPTIONS /internal/pcp-referrals",
++      "OPTIONS /internal/practices",
++      "OPTIONS /internal/practices/{practiceId}",
++    ]);
++  });
++
++  test("every authenticated operation rejects a missing Authorization header with 401", async () => {
++    for (const { method, url } of authenticated) {
++      const res = await serverHelper.getServer().inject({ method, url });
++
++      expect(res.statusCode, `${method} ${url}`).toBe(401);
++      expect(res.json(), `${method} ${url}`).toMatchObject({
++        errorType: "AuthenticationError",
++      });
++    }
++  });
++
++  test("every authenticated operation rejects a key outside the allowlist with 401", async () => {
++    for (const { method, url } of authenticated) {
++      const res = await serverHelper.getServer().inject({
++        method,
++        url,
++        headers: { authorization: "Bearer not-an-allowlisted-key" },
++      });
++
++      expect(res.statusCode, `${method} ${url}`).toBe(401);
++      expect(res.json(), `${method} ${url}`).toMatchObject({
++        errorType: "AuthenticationError",
++      });
++    }
++  });
++
++  test("every authenticated operation rejects a non-Bearer scheme with 401", async () => {
++    for (const { method, url } of authenticated) {
++      const res = await serverHelper.getServer().inject({
++        method,
++        url,
++        headers: { authorization: "Basic valid-test-key" },
++      });
++
++      expect(res.statusCode, `${method} ${url}`).toBe(401);
++    }
++  });
++
++  test("every authenticated operation rejects a bare key with no scheme prefix with 401", async () => {
++    for (const { method, url } of authenticated) {
++      const res = await serverHelper.getServer().inject({
++        method,
++        url,
++        headers: { authorization: "valid-test-key" },
++      });
++
++      expect(res.statusCode, `${method} ${url}`).toBe(401);
++    }
++  });
++
++  test("the declared x-api-key header alone does not authenticate — the scheme is bearer", async () => {
++    for (const { method, url } of authenticated) {
++      const res = await serverHelper.getServer().inject({
++        method,
++        url,
++        headers: { "x-api-key": "valid-test-key" },
++      });
++
++      expect(res.statusCode, `${method} ${url}`).toBe(401);
++    }
++  });
++
++  test("every authenticated operation accepts a valid Bearer key", async () => {
++    for (const { method, url } of authenticated) {
++      const res = await serverHelper.getServer().inject({
++        method,
++        url,
++        headers: { authorization: VALID_KEY },
++      });
++
++      expect(res.statusCode, `${method} ${url}`).not.toBe(401);
++    }
++  });
++
++  test("every CORS preflight operation responds 204 without authentication", async () => {
++    for (const { method, url } of preflight) {
++      const res = await serverHelper.getServer().inject({ method, url });
++
++      expect(res.statusCode, `${method} ${url}`).toBe(204);
++    }
++  });
++});
+diff --git a/apps/api/src/__tests__/routes/internal-pcp-referrals.test.ts b/apps/api/src/__tests__/routes/internal-pcp-referrals.test.ts
+index 1b4b3201..69243405 100644
+--- a/apps/api/src/__tests__/routes/internal-pcp-referrals.test.ts
++++ b/apps/api/src/__tests__/routes/internal-pcp-referrals.test.ts
+@@ -9,7 +9,7 @@ vi.mock("../../service/pcp-referrals-service", () => ({
+ describe("DELETE /internal/pcp-referrals", () => {
+   const serverHelper = useServerHelper();
+ 
+-  test("returns 401 without x-api-key", async () => {
++  test("returns 401 without an Authorization header", async () => {
+     const server = serverHelper.getServer();
+ 
+     const response = await server.inject({
+@@ -20,7 +20,7 @@ describe("DELETE /internal/pcp-referrals", () => {
+     expect(response.statusCode).toBe(401);
+   });
+ 
+-  test("returns 204 with valid x-api-key", async () => {
++  test("returns 204 with a valid Bearer API key", async () => {
+     const server = serverHelper.getServer();
+ 
+     const response = await server.inject({
+diff --git a/apps/api/src/__tests__/routes/internal-practices-crud.test.ts b/apps/api/src/__tests__/routes/internal-practices-crud.test.ts
+new file mode 100644
+index 00000000..54aec897
+--- /dev/null
++++ b/apps/api/src/__tests__/routes/internal-practices-crud.test.ts
+@@ -0,0 +1,301 @@
++import { clearAllItems, practiceRepository } from "@attribution-service/data";
++import { afterEach, describe, expect, test, vi } from "vitest";
++import { useServerHelper } from "../util";
++
++vi.mock("../../config");
++
++const AUTH_HEADER = { authorization: "Bearer valid-test-key" };
++
++const BASE_BODY = {
++  id: "ACCT-001",
++  name: "Smith Family Practice",
++  status: "SOLD" as const,
++  accountManager: "Jordan Lee",
++  practiceEmail: "front-desk@smith.example",
++};
++
++describe("internal practices CRUD", () => {
++  const serverHelper = useServerHelper();
++
++  afterEach(async () => {
++    await clearAllItems();
++  });
++
++  const post = (payload: unknown) =>
++    serverHelper.getServer().inject({
++      method: "POST",
++      url: "/internal/practices",
++      headers: AUTH_HEADER,
++      payload,
++    });
++
++  const get = (url: string) =>
++    serverHelper.getServer().inject({ method: "GET", url, headers: AUTH_HEADER });
++
++  const patch = (id: string, payload: unknown) =>
++    serverHelper.getServer().inject({
++      method: "PATCH",
++      url: `/internal/practices/${id}`,
++      headers: AUTH_HEADER,
++      payload,
++    });
++
++  const del = (url: string) =>
++    serverHelper.getServer().inject({ method: "DELETE", url, headers: AUTH_HEADER });
++
++  describe("POST /internal/practices", () => {
++    test("valid body returns 201 with the stored record and server timestamps", async () => {
++      const res = await post(BASE_BODY);
++
++      expect(res.statusCode).toBe(201);
++      expect(res.json()).toMatchObject(BASE_BODY);
++      expect(typeof res.json().createdAt).toBe("string");
++      expect(typeof res.json().updatedAt).toBe("string");
++    });
++
++    test("duplicate id returns 409 ConflictError and leaves the record unmodified", async () => {
++      await post(BASE_BODY);
++
++      const res = await post({ ...BASE_BODY, name: "Impostor Practice" });
++
++      expect(res.statusCode).toBe(409);
++      expect(res.json()).toMatchObject({ errorType: "ConflictError" });
++
++      const stored = await get("/internal/practices/ACCT-001");
++      expect(stored.json().name).toBe("Smith Family Practice");
++    });
++
++    test("missing name returns 422", async () => {
++      const { name, ...withoutName } = BASE_BODY;
++
++      const res = await post(withoutName);
++
++      expect(res.statusCode).toBe(422);
++      expect(res.json()).toMatchObject({ errorType: "UnprocessableContentError" });
++    });
++
++    test("status outside the enum returns 422", async () => {
++      const res = await post({ ...BASE_BODY, status: "NOT_A_STATUS" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("supplying server-managed createdAt returns 422", async () => {
++      const res = await post({ ...BASE_BODY, createdAt: "2020-01-01T00:00:00.000Z" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("omitted optional fields are absent on read, not null", async () => {
++      await post({ id: "p-minimal", name: "Minimal", status: "SOLD" });
++
++      const body = (await get("/internal/practices/p-minimal")).json();
++
++      expect(body).not.toHaveProperty("accountManager");
++      expect(body).not.toHaveProperty("practiceEmail");
++      expect(body).not.toHaveProperty("lastReferralDate");
++    });
++  });
++
++  describe("GET /internal/practices/{practiceId}", () => {
++    test("existing id returns 200 with every stored attribute", async () => {
++      await post({ ...BASE_BODY, lastReferralDate: "2026-05-15" });
++
++      const res = await get("/internal/practices/ACCT-001");
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).toMatchObject({
++        ...BASE_BODY,
++        lastReferralDate: "2026-05-15",
++      });
++    });
++
++    test("unknown id returns 404 NotFoundError", async () => {
++      const res = await get("/internal/practices/does-not-exist");
++
++      expect(res.statusCode).toBe(404);
++      expect(res.json()).toMatchObject({ errorType: "NotFoundError" });
++    });
++  });
++
++  describe("GET /internal/practices", () => {
++    test("no filter returns a page of practices", async () => {
++      await post(BASE_BODY);
++      await post({ id: "ACCT-002", name: "Jones Practice", status: "CHURNED" });
++
++      const res = await get("/internal/practices");
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json().practices).toHaveLength(2);
++    });
++
++    test("filters by name, status, and accountManager", async () => {
++      await post(BASE_BODY);
++      await post({
++        id: "ACCT-002",
++        name: "Jones Practice",
++        status: "CHURNED",
++        accountManager: "Casey Kim",
++      });
++
++      const byName = await get("/internal/practices?name=Jones%20Practice");
++      expect(byName.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-002"]);
++
++      const byStatus = await get("/internal/practices?status=SOLD");
++      expect(byStatus.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-001"]);
++
++      const byAm = await get("/internal/practices?accountManager=Casey%20Kim");
++      expect(byAm.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-002"]);
++    });
++
++    test("name lookup is case-insensitive because the GSI2 key is upper-cased", async () => {
++      await post(BASE_BODY);
++
++      const res = await get("/internal/practices?name=smith%20family%20practice");
++
++      expect(res.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-001"]);
++    });
++
++    test("accountManager lookup is case-insensitive", async () => {
++      await post(BASE_BODY);
++
++      const res = await get("/internal/practices?accountManager=jordan%20lee");
++
++      expect(res.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-001"]);
++    });
++
++    test("limit outside 1-100 returns 422", async () => {
++      expect((await get("/internal/practices?limit=0")).statusCode).toBe(422);
++      expect((await get("/internal/practices?limit=101")).statusCode).toBe(422);
++    });
++
++    test("cursor replay returns the next page without repeats or gaps", async () => {
++      for (const id of ["p1", "p2", "p3"]) {
++        await post({ id, name: `Practice ${id}`, status: "SOLD" });
++      }
++
++      const first = await get("/internal/practices?limit=2");
++      expect(first.json().practices).toHaveLength(2);
++      expect(first.json().nextCursor).toBeDefined();
++
++      const cursor = encodeURIComponent(first.json().nextCursor);
++      const second = await get(`/internal/practices?limit=2&cursor=${cursor}`);
++
++      const firstIds = first.json().practices.map((p: { id: string }) => p.id);
++      const secondIds = second.json().practices.map((p: { id: string }) => p.id);
++
++      expect(secondIds).not.toEqual(expect.arrayContaining(firstIds));
++      expect([...firstIds, ...secondIds].sort()).toEqual(["p1", "p2", "p3"]);
++    });
++  });
++
++  describe("PATCH /internal/practices/{practiceId}", () => {
++    test("partial body returns 200 and preserves untouched fields", async () => {
++      await post({ ...BASE_BODY, lastReferralDate: "2026-05-15" });
++
++      const res = await patch("ACCT-001", { status: "CHURNED" });
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).toMatchObject({
++        id: "ACCT-001",
++        name: "Smith Family Practice",
++        status: "CHURNED",
++        accountManager: "Jordan Lee",
++        practiceEmail: "front-desk@smith.example",
++        lastReferralDate: "2026-05-15",
++      });
++    });
++
++    test("unknown id returns 404 and does not create the record", async () => {
++      const res = await patch("does-not-exist", { name: "Ghost" });
++
++      expect(res.statusCode).toBe(404);
++      expect(await practiceRepository.getPractice("does-not-exist")).toBeNull();
++    });
++
++    test("body containing id returns 422 — id is immutable", async () => {
++      await post(BASE_BODY);
++
++      const res = await patch("ACCT-001", { id: "ACCT-999", name: "Renamed" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("null clears an optional field so it is absent on re-read", async () => {
++      await post(BASE_BODY);
++
++      const res = await patch("ACCT-001", { practiceEmail: null });
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).not.toHaveProperty("practiceEmail");
++      expect((await get("/internal/practices/ACCT-001")).json()).not.toHaveProperty(
++        "practiceEmail",
++      );
++    });
++
++    test("clearing accountManager removes it from the account-manager lookup", async () => {
++      await post(BASE_BODY);
++
++      await patch("ACCT-001", { accountManager: null });
++
++      const res = await get("/internal/practices?accountManager=Jordan%20Lee");
++      expect(res.json().practices).toEqual([]);
++    });
++
++    test("empty body returns 422 rather than issuing a no-op write", async () => {
++      await post(BASE_BODY);
++
++      const res = await patch("ACCT-001", {});
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("advances updatedAt and leaves createdAt unchanged", async () => {
++      const created = (await post(BASE_BODY)).json();
++      await new Promise((resolve) => setTimeout(resolve, 25));
++
++      const patched = (await patch("ACCT-001", { name: "Renamed" })).json();
++
++      expect(patched.createdAt).toBe(created.createdAt);
++      expect(new Date(patched.updatedAt).getTime()).toBeGreaterThan(
++        new Date(created.updatedAt).getTime(),
++      );
++    });
++  });
++
++  describe("DELETE /internal/practices/{practiceId}", () => {
++    test("existing id returns 204 and removes the record", async () => {
++      await post(BASE_BODY);
++
++      const res = await del("/internal/practices/ACCT-001");
++
++      expect(res.statusCode).toBe(204);
++      expect((await get("/internal/practices/ACCT-001")).statusCode).toBe(404);
++    });
++
++    test("unknown id returns 404", async () => {
++      const res = await del("/internal/practices/does-not-exist");
++
++      expect(res.statusCode).toBe(404);
++    });
++
++    test("deleting one practice leaves the others intact", async () => {
++      await post(BASE_BODY);
++      await post({ id: "ACCT-002", name: "Jones Practice", status: "SOLD" });
++
++      await del("/internal/practices/ACCT-001");
++
++      expect((await get("/internal/practices/ACCT-002")).statusCode).toBe(200);
++    });
++
++    test("delete-all keeps its existing 204 behavior", async () => {
++      await post(BASE_BODY);
++      await post({ id: "ACCT-002", name: "Jones Practice", status: "SOLD" });
++
++      const res = await del("/internal/practices");
++
++      expect(res.statusCode).toBe(204);
++      expect((await get("/internal/practices")).json().practices).toEqual([]);
++    });
++  });
++});
+diff --git a/apps/api/src/__tests__/routes/internal-spec-contract.test.ts b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+new file mode 100644
+index 00000000..90c316dc
+--- /dev/null
++++ b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+@@ -0,0 +1,78 @@
++import type { FastifyInstance } from "fastify";
++import { describe, expect, test, vi } from "vitest";
++import { useServerHelper } from "../util";
++
++vi.mock("../../config");
++
++type ServedSpec = {
++  servers?: { url: string; description?: string; "x-internal"?: boolean }[];
++  paths?: Record<string, Record<string, { operationId?: string }>>;
++  components?: {
++    securitySchemes?: Record<
++      string,
++      { type?: string; scheme?: string; in?: string; name?: string }
++    >;
++  };
++};
++
++async function fetchInternalSpec(server: FastifyInstance): Promise<ServedSpec> {
++  const res = await server.inject({ method: "GET", url: "/internal-documentation/json" });
++  expect(res.statusCode).toBe(200);
++  return res.json() as ServedSpec;
++}
++
++describe("internal spec contract", () => {
++  const serverHelper = useServerHelper();
++
++  test("declares apiKeyAuth as HTTP bearer, matching what apiKeyAuth actually reads", async () => {
++    const spec = await fetchInternalSpec(serverHelper.getServer());
++
++    expect(spec.components?.securitySchemes?.apiKeyAuth).toMatchObject({
++      type: "http",
++      scheme: "bearer",
++    });
++  });
++
++  test("does not declare apiKeyAuth as an x-api-key header scheme", async () => {
++    const spec = await fetchInternalSpec(serverHelper.getServer());
++    const scheme = spec.components?.securitySchemes?.apiKeyAuth;
++
++    expect(scheme?.type).not.toBe("apiKey");
++    expect(scheme?.in).toBeUndefined();
++    expect(scheme?.name).toBeUndefined();
++  });
++
++  test("lists local, dev-int, and prod-int servers, all flagged internal", async () => {
++    const spec = await fetchInternalSpec(serverHelper.getServer());
++
++    expect(spec.servers?.map((s) => s.url)).toEqual([
++      "http://localhost:3024",
++      "https://attribution-service.dev-int.rula.com",
++      "https://attribution-service.prod-int.rula.com",
++    ]);
++    expect(spec.servers?.every((s) => s["x-internal"] === true)).toBe(true);
++  });
++
++  test("lists every internal operationId so missing glue wiring fails here, not in a browser", async () => {
++    const spec = await fetchInternalSpec(serverHelper.getServer());
++
++    const operationIds = Object.values(spec.paths ?? {})
++      .flatMap((methods) => Object.values(methods))
++      .map((operation) => operation.operationId)
++      .filter((id): id is string => typeof id === "string")
++      .sort();
++
++    expect(operationIds).toEqual([
++      "createPractice",
++      "deleteAllPcpReferrals",
++      "deleteAllPractices",
++      "deletePractice",
++      "getInternalPractice",
++      "listInternalPractices",
++      "optionsInternalPcpReferrals",
++      "optionsInternalPractices",
++      "optionsInternalPracticesPracticeId",
++      "updatePractice",
++    ]);
++  });
++});
+diff --git a/apps/api/src/cors.ts b/apps/api/src/cors.ts
+index 9fe21f75..28fc893f 100644
+--- a/apps/api/src/cors.ts
++++ b/apps/api/src/cors.ts
+@@ -55,7 +55,7 @@ function isIntHostname(req: Parameters<FastifyCorsOptionsDelegate>[0]): boolean
+ const CORS_HEADERS: Pick<FastifyCorsOptions, "credentials" | "methods" | "allowedHeaders"> = {
+   credentials: true,
+   methods: ["GET", "POST", "OPTIONS", "PATCH", "PUT", "DELETE"],
+-  allowedHeaders: ["Authorization", "X-API-Key", "Content-Type"],
++  allowedHeaders: ["Authorization", "Content-Type"],
+ };
+ 
+ export const corsOptionsDelegate: FastifyCorsOptionsDelegate = (req, cb) => {
+diff --git a/apps/api/src/errors.ts b/apps/api/src/errors.ts
+index 7f5b1dda..940b6639 100644
+--- a/apps/api/src/errors.ts
++++ b/apps/api/src/errors.ts
+@@ -24,8 +24,10 @@
+  */
+ 
+ import type { FastifySchemaValidationError } from "fastify/types/schema";
++import type { components as internalComponents } from "./generated/internal-types";
+ import type { components } from "./generated/types";
+ 
++type ConflictErrorSchema = internalComponents["schemas"]["ConflictError"];
+ type BadRequestErrorSchema = components["schemas"]["BadRequestError"];
+ type AuthenticationErrorSchema = components["schemas"]["AuthenticationError"];
+ type ForbiddenErrorSchema = components["schemas"]["ForbiddenError"];
+@@ -121,6 +123,21 @@ export class NotFoundError extends ResponseError implements NotFoundErrorSchema
+   }
+ }
+ 
++/**
++ * Conflict error (409) - The resource already exists
++ *
++ * Declared by the internal spec only, so it is typed against
++ * internal-types.ts rather than the public generated types.
++ */
++export class ConflictError extends ResponseError implements ConflictErrorSchema {
++  declare readonly errorType: "ConflictError";
++
++  constructor(message = "Conflict") {
++    super(message, 409);
++    this.errorType = "ConflictError";
++  }
++}
++
+ /**
+  * Content Issue - Represents a single validation error
+  *
+diff --git a/apps/api/src/generated/internal-route-handler-types.ts b/apps/api/src/generated/internal-route-handler-types.ts
+index 8335782c..0a299233 100644
+--- a/apps/api/src/generated/internal-route-handler-types.ts
++++ b/apps/api/src/generated/internal-route-handler-types.ts
+@@ -36,5 +36,11 @@ export type RouteHandler<T extends keyof operations> = RouteHandlerMethod<
+ 
+ export type DeleteAllPcpReferralsRouteHandler = RouteHandler<'deleteAllPcpReferrals'>
+ export type OptionsInternalPcpReferralsRouteHandler = RouteHandler<'optionsInternalPcpReferrals'>
++export type ListInternalPracticesRouteHandler = RouteHandler<'listInternalPractices'>
++export type CreatePracticeRouteHandler = RouteHandler<'createPractice'>
+ export type DeleteAllPracticesRouteHandler = RouteHandler<'deleteAllPractices'>
+ export type OptionsInternalPracticesRouteHandler = RouteHandler<'optionsInternalPractices'>
++export type GetInternalPracticeRouteHandler = RouteHandler<'getInternalPractice'>
++export type DeletePracticeRouteHandler = RouteHandler<'deletePractice'>
++export type OptionsInternalPracticesPracticeIdRouteHandler = RouteHandler<'optionsInternalPracticesPracticeId'>
++export type UpdatePracticeRouteHandler = RouteHandler<'updatePractice'>
+diff --git a/apps/api/src/generated/internal-types.ts b/apps/api/src/generated/internal-types.ts
+index 68726e5b..c0d87de3 100644
+--- a/apps/api/src/generated/internal-types.ts
++++ b/apps/api/src/generated/internal-types.ts
+@@ -35,9 +35,17 @@ export interface paths {
+             path?: never;
+             cookie?: never;
+         };
+-        get?: never;
++        /**
++         * List practice records
++         * @description Returns a page of stored practice records. Supplying exactly one of name, status, or accountManager serves the page from the matching GSI; supplying none scans the table. Name and accountManager lookups are case-insensitive because those index keys are upper-cased.
++         */
++        get: operations["listInternalPractices"];
+         put?: never;
+-        post?: never;
++        /**
++         * Create a practice record
++         * @description Creates a practice with a caller-supplied id. Rejects with 409 if a practice with that id already exists rather than overwriting it, which is the difference between this operation and the Hex ingest upsert.
++         */
++        post: operations["createPractice"];
+         /**
+          * Delete all practice records
+          * @description Wipes all practice records from the table. Intended for dev tooling — guarded by apiKeyAuth and not reachable via Kong (internal spec only).
+@@ -52,6 +60,41 @@ export interface paths {
+         patch?: never;
+         trace?: never;
+     };
++    "/internal/practices/{practiceId}": {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        /**
++         * Get a practice record
++         * @description Returns the full stored state of one practice. Optional attributes that are absent are omitted rather than returned as null.
++         */
++        get: operations["getInternalPractice"];
++        put?: never;
++        post?: never;
++        /**
++         * Delete a practice record
++         * @description Deletes one practice, leaving every other record intact.
++         */
++        delete: operations["deletePractice"];
++        /**
++         * CORS preflight
++         * @description Auto-generated preflight operation for Kong routing.
++         */
++        options: operations["optionsInternalPracticesPracticeId"];
++        head?: never;
++        /**
++         * Update a practice record
++         * @description Applies only the supplied fields. Omitting a field leaves the stored value untouched; supplying null for an optional field clears it. Never creates a record — an unknown practiceId is a 404, not an upsert.
++         */
++        patch: operations["updatePractice"];
++        trace?: never;
++    };
+ }
+ export type webhooks = Record<string, never>;
+ export interface components {
+@@ -73,6 +116,95 @@ export interface components {
+             /** @description Error message */
+             message: string;
+         });
++        NotFoundError: {
++            errorType: "NotFoundError";
++        } & (Omit<components["schemas"]["ResponseError"], "errorType"> & {
++            errorType: string;
++            message: string;
++        });
++        ConflictError: {
++            errorType: "ConflictError";
++        } & (Omit<components["schemas"]["ResponseError"], "errorType"> & {
++            errorType: string;
++            message: string;
++        });
++        UnprocessableContentError: {
++            errorType: "UnprocessableContentError";
++        } & (Omit<components["schemas"]["ResponseError"], "errorType"> & {
++            errorType: string;
++            message: string;
++            issues: components["schemas"]["ContentIssue"][];
++        });
++        ContentIssue: {
++            /** @description Path to the field that failed validation */
++            instancePath: string;
++            /** @description Validation error code */
++            code: string;
++            /** @description Human-readable error message */
++            message: string;
++            /** @description Additional parameters related to the validation error */
++            params?: {
++                [key: string]: unknown;
++            };
++        };
++        /**
++         * @description Engagement status of the practice.
++         * @enum {string}
++         */
++        PracticeStatus: "SOLD" | "ONBOARDING" | "STALLED_IN_ONBOARDING" | "CHURNED" | "OTHER";
++        /** @description The full stored state of a practice. Optional attributes are omitted when absent rather than returned as null. */
++        InternalPractice: {
++            /** @description Salesforce account id (upstream primary key). */
++            id: string;
++            /** @description Practice name. */
++            name: string;
++            status: components["schemas"]["PracticeStatus"];
++            /** @description Name of the account manager assigned to this practice. */
++            accountManager?: string;
++            /** @description Contact email used by the monthly batch report send. */
++            practiceEmail?: string;
++            /**
++             * Format: date
++             * @description Date of the most recent referral (YYYY-MM-DD).
++             */
++            lastReferralDate?: string;
++            /**
++             * Format: date-time
++             * @description Server-assigned creation timestamp.
++             */
++            createdAt: string;
++            /**
++             * Format: date-time
++             * @description Server-assigned last-modified timestamp.
++             */
++            updatedAt: string;
++        };
++        InternalPracticeListResponse: {
++            practices: components["schemas"]["InternalPractice"][];
++            /** @description Present when more results remain; replay it to fetch the next page. */
++            nextCursor?: string;
++        };
++        /** @description createdAt and updatedAt are server-managed and rejected if supplied. */
++        CreateInternalPracticeRequest: {
++            /** @description Salesforce account id (upstream primary key). */
++            id: string;
++            /** @description Practice name. */
++            name: string;
++            status: components["schemas"]["PracticeStatus"];
++            accountManager?: string;
++            practiceEmail?: string;
++            /** Format: date */
++            lastReferralDate?: string;
++        };
++        /** @description Supply only the fields to change. Omitting a field leaves the stored value untouched; null clears an optional field. id is the primary key and cannot be changed, so it is rejected here. */
++        UpdateInternalPracticeRequest: {
++            name?: string;
++            status?: components["schemas"]["PracticeStatus"];
++            accountManager?: string | null;
++            practiceEmail?: string | null;
++            /** Format: date */
++            lastReferralDate?: string | null;
++        };
+     };
+     responses: {
+         /** @description Unauthorized - Authentication credentials are missing or invalid */
+@@ -93,6 +225,33 @@ export interface components {
+                 "application/json": components["schemas"]["InternalServerError"];
+             };
+         };
++        /** @description Not Found - The requested resource does not exist */
++        NotFoundErrorResponse: {
++            headers: {
++                [name: string]: unknown;
++            };
++            content: {
++                "application/json": components["schemas"]["NotFoundError"];
++            };
++        };
++        /** @description Conflict - The resource already exists */
++        ConflictErrorResponse: {
++            headers: {
++                [name: string]: unknown;
++            };
++            content: {
++                "application/json": components["schemas"]["ConflictError"];
++            };
++        };
++        /** @description Unprocessable Content - The request contains validation errors */
++        UnprocessableContentErrorResponse: {
++            headers: {
++                [name: string]: unknown;
++            };
++            content: {
++                "application/json": components["schemas"]["UnprocessableContentError"];
++            };
++        };
+     };
+     parameters: never;
+     requestBodies: never;
+@@ -139,6 +298,68 @@ export interface operations {
+             };
+         };
+     };
++    listInternalPractices: {
++        parameters: {
++            query?: {
++                /** @description Exact practice name to look up (case-insensitive). */
++                name?: string;
++                /** @description Practice status to filter by. */
++                status?: components["schemas"]["PracticeStatus"];
++                /** @description Account manager name to look up (case-insensitive). */
++                accountManager?: string;
++                /** @description Maximum number of records to return. */
++                limit?: number;
++                /** @description Opaque pagination cursor returned by a previous call. */
++                cursor?: string;
++            };
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description A page of practice records. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPracticeListResponse"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    createPractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": components["schemas"]["CreateInternalPracticeRequest"];
++            };
++        };
++        responses: {
++            /** @description Practice created. */
++            201: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPractice"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            409: components["responses"]["ConflictErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
+     deleteAllPractices: {
+         parameters: {
+             query?: never;
+@@ -177,4 +398,107 @@ export interface operations {
+             };
+         };
+     };
++    getInternalPractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description The practice record. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPractice"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    deletePractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description Practice deleted. */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    optionsInternalPracticesPracticeId: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description No Content */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    updatePractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": components["schemas"]["UpdateInternalPracticeRequest"];
++            };
++        };
++        responses: {
++            /** @description The updated practice record. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPractice"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
+ }
+diff --git a/apps/api/src/routes/internal/practices.ts b/apps/api/src/routes/internal/practices.ts
+index df2665db..779a8a43 100644
+--- a/apps/api/src/routes/internal/practices.ts
++++ b/apps/api/src/routes/internal/practices.ts
+@@ -1,8 +1,17 @@
++import { ConflictError as DataConflictError } from "@attribution-service/data";
+ import { logger } from "../../components";
++import { ConflictError, NotFoundError } from "../../errors";
+ import type {
++  CreatePracticeRouteHandler,
+   DeleteAllPracticesRouteHandler,
++  DeletePracticeRouteHandler,
++  GetInternalPracticeRouteHandler,
++  ListInternalPracticesRouteHandler,
++  OptionsInternalPracticesPracticeIdRouteHandler,
+   OptionsInternalPracticesRouteHandler,
++  UpdatePracticeRouteHandler,
+ } from "../../generated/internal-route-handler-types";
++import * as internalPracticeService from "../../service/internal-practice-service";
+ import * as practiceService from "../../service/practice-service";
+ 
+ export const deleteAllPractices: DeleteAllPracticesRouteHandler = async (_request, reply) => {
+@@ -11,9 +20,66 @@ export const deleteAllPractices: DeleteAllPracticesRouteHandler = async (_reques
+   reply.code(204).send();
+ };
+ 
++export const listInternalPractices: ListInternalPracticesRouteHandler = async (request) => {
++  const { name, status, accountManager, limit, cursor } = request.query ?? {};
++
++  return internalPracticeService.listPractices({
++    ...(name !== undefined && { name }),
++    ...(status !== undefined && { status }),
++    ...(accountManager !== undefined && { accountManager }),
++    ...(limit !== undefined && { limit }),
++    ...(cursor !== undefined && { cursor }),
++  });
++};
++
++export const createPractice: CreatePracticeRouteHandler = async (request, reply) => {
++  try {
++    const created = await internalPracticeService.createPractice(request.body);
++    reply.code(201);
++    return created;
++  } catch (error) {
++    if (error instanceof DataConflictError) {
++      throw new ConflictError(error.message);
++    }
++    throw error;
++  }
++};
++
++export const getInternalPractice: GetInternalPracticeRouteHandler = async (request) => {
++  const practice = await internalPracticeService.getPractice(request.params.practiceId);
++  if (!practice) {
++    throw new NotFoundError(`Practice ${request.params.practiceId} not found`);
++  }
++  return practice;
++};
++
++export const updatePractice: UpdatePracticeRouteHandler = async (request) => {
++  const updated = await internalPracticeService.updatePractice(
++    request.params.practiceId,
++    request.body,
++  );
++  if (!updated) {
++    throw new NotFoundError(`Practice ${request.params.practiceId} not found`);
++  }
++  return updated;
++};
++
++export const deletePractice: DeletePracticeRouteHandler = async (request, reply) => {
++  const deleted = await internalPracticeService.deletePractice(request.params.practiceId);
++  if (!deleted) {
++    throw new NotFoundError(`Practice ${request.params.practiceId} not found`);
++  }
++  reply.code(204).send();
++};
++
+ export const optionsInternalPractices: OptionsInternalPracticesRouteHandler = async (
+   _request,
+   reply,
+ ) => {
+   reply.code(204).send();
+ };
++
++export const optionsInternalPracticesPracticeId: OptionsInternalPracticesPracticeIdRouteHandler =
++  async (_request, reply) => {
++    reply.code(204).send();
++  };
+diff --git a/apps/api/src/server.ts b/apps/api/src/server.ts
+index 471aacd5..770a8748 100644
+--- a/apps/api/src/server.ts
++++ b/apps/api/src/server.ts
+@@ -50,7 +50,16 @@ export const createServer = (opts?: FastifyServerOptions): FastifyInstance => {
+     loggerInstance: logger as FastifyBaseLogger,
+     ...opts,
+     disableRequestLogging: true, // Use custom logging hooks instead
+-    ajv: { customOptions: { strict: true } }, // Strict JSON schema validation
++    ajv: {
++      customOptions: {
++        strict: true, // Strict JSON schema validation
++        // Fastify defaults to removeAdditional: true, which silently strips unknown
++        // properties. Schemas declaring additionalProperties: false need those
++        // requests rejected instead — an immutable field supplied in a PATCH body
++        // must 422 rather than be quietly dropped.
++        removeAdditional: false,
++      },
++    },
+   });
+ 
+   server.register(logContext.fastifyContext); // Register imported version to share store with logContext
+diff --git a/apps/api/src/service/internal-practice-service.ts b/apps/api/src/service/internal-practice-service.ts
+new file mode 100644
+index 00000000..c904ae80
+--- /dev/null
++++ b/apps/api/src/service/internal-practice-service.ts
+@@ -0,0 +1,86 @@
++import type { Practice, PracticeStatus } from "@attribution-service/data";
++import { practiceRepository } from "@attribution-service/data";
++import type { components } from "../generated/internal-types";
++
++type InternalPractice = components["schemas"]["InternalPractice"];
++type CreateRequest = components["schemas"]["CreateInternalPracticeRequest"];
++type UpdateRequest = components["schemas"]["UpdateInternalPracticeRequest"];
++
++export type ListFilters = {
++  name?: string;
++  status?: PracticeStatus;
++  accountManager?: string;
++  limit?: number;
++  cursor?: string;
++};
++
++/**
++ * Absent optional attributes are omitted rather than serialized as null, so a
++ * response mirrors what is actually stored.
++ */
++export function toInternalPractice(practice: Practice): InternalPractice {
++  return {
++    id: practice.id,
++    name: practice.name,
++    status: practice.status,
++    ...(practice.accountManager !== undefined && { accountManager: practice.accountManager }),
++    ...(practice.practiceEmail !== undefined && { practiceEmail: practice.practiceEmail }),
++    ...(practice.lastReferralDate !== undefined && {
++      lastReferralDate: practice.lastReferralDate,
++    }),
++    createdAt: practice.createdAt.toISOString(),
++    updatedAt: practice.updatedAt.toISOString(),
++  };
++}
++
++export async function createPractice(request: CreateRequest): Promise<InternalPractice> {
++  const created = await practiceRepository.createPractice(request);
++  return toInternalPractice(created);
++}
++
++export async function getPractice(id: string): Promise<InternalPractice | null> {
++  const practice = await practiceRepository.getPractice(id);
++  return practice ? toInternalPractice(practice) : null;
++}
++
++export async function updatePractice(
++  id: string,
++  request: UpdateRequest,
++): Promise<InternalPractice | null> {
++  const patched = await practiceRepository.patchPractice(id, request);
++  return patched ? toInternalPractice(patched) : null;
++}
++
++export async function deletePractice(id: string): Promise<boolean> {
++  return practiceRepository.deletePractice(id);
++}
++
++export async function listPractices(
++  filters: ListFilters = {},
++): Promise<{ practices: InternalPractice[]; nextCursor?: string }> {
++  const page = await fetchPage(filters);
++
++  return {
++    practices: page.practices.map(toInternalPractice),
++    ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
++  };
++}
++
++/**
++ * At most one filter is honoured, in declaration order, so each lookup is served
++ * by its own GSI rather than by a scan-and-filter.
++ */
++function fetchPage(filters: ListFilters) {
++  const { name, status, accountManager, limit, cursor } = filters;
++
++  if (name !== undefined) {
++    return practiceRepository.listPracticesByName(name, limit, cursor);
++  }
++  if (status !== undefined) {
++    return practiceRepository.listPracticesByStatus(status, limit, cursor);
++  }
++  if (accountManager !== undefined) {
++    return practiceRepository.listPracticesByAccountManager(accountManager, limit, cursor);
++  }
++  return practiceRepository.listPractices(limit, cursor);
++}
+diff --git a/docs/openapi-internal.yaml b/docs/openapi-internal.yaml
+index 8f320886..ebc06910 100644
+--- a/docs/openapi-internal.yaml
++++ b/docs/openapi-internal.yaml
+@@ -10,7 +10,15 @@ info:
+     name: Proprietary
+     identifier: Proprietary
+ 
++# Local is listed first so Swagger UI's default target is not production —
++# these operations include destructive dev tooling.
+ servers:
++  - url: http://localhost:3024
++    description: Local development
++    x-internal: true
++  - url: https://attribution-service.dev-int.rula.com
++    description: Development environment, non-production (VPN-only)
++    x-internal: true
+   - url: https://attribution-service.prod-int.rula.com
+     description: Production environment (VPN-only)
+     x-internal: true
+@@ -53,6 +61,104 @@ paths:
+           description: No Content
+ 
+   /internal/practices:
++    get:
++      operationId: listInternalPractices
++      summary: List practice records
++      description: >
++        Returns a page of stored practice records. Supplying exactly one of
++        name, status, or accountManager serves the page from the matching GSI;
++        supplying none scans the table. Name and accountManager lookups are
++        case-insensitive because those index keys are upper-cased.
++      security:
++        - apiKeyAuth: []
++      parameters:
++        - name: name
++          in: query
++          required: false
++          description: Exact practice name to look up (case-insensitive).
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 255
++        - name: status
++          in: query
++          required: false
++          description: Practice status to filter by.
++          schema:
++            $ref: "#/components/schemas/PracticeStatus"
++        - name: accountManager
++          in: query
++          required: false
++          description: Account manager name to look up (case-insensitive).
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 255
++        - name: limit
++          in: query
++          required: false
++          description: Maximum number of records to return.
++          schema:
++            type: integer
++            format: int32
++            minimum: 1
++            maximum: 100
++            default: 25
++        - name: cursor
++          in: query
++          required: false
++          description: Opaque pagination cursor returned by a previous call.
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 4096
++      responses:
++        "200":
++          description: A page of practice records.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPracticeListResponse"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    post:
++      operationId: createPractice
++      summary: Create a practice record
++      description: >
++        Creates a practice with a caller-supplied id. Rejects with 409 if a
++        practice with that id already exists rather than overwriting it, which
++        is the difference between this operation and the Hex ingest upsert.
++      security:
++        - apiKeyAuth: []
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: "#/components/schemas/CreateInternalPracticeRequest"
++      responses:
++        "201":
++          description: Practice created.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPractice"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "409":
++          $ref: "#/components/responses/ConflictErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
+     delete:
+       operationId: deleteAllPractices
+       summary: Delete all practice records
+@@ -79,12 +185,110 @@ paths:
+         "204":
+           description: No Content
+ 
++  /internal/practices/{practiceId}:
++    parameters:
++      - name: practiceId
++        in: path
++        required: true
++        description: Salesforce account id of the practice.
++        schema:
++          type: string
++          minLength: 1
++          maxLength: 100
++    get:
++      operationId: getInternalPractice
++      summary: Get a practice record
++      description: >
++        Returns the full stored state of one practice. Optional attributes that
++        are absent are omitted rather than returned as null.
++      security:
++        - apiKeyAuth: []
++      responses:
++        "200":
++          description: The practice record.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPractice"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    patch:
++      operationId: updatePractice
++      summary: Update a practice record
++      description: >
++        Applies only the supplied fields. Omitting a field leaves the stored
++        value untouched; supplying null for an optional field clears it. Never
++        creates a record — an unknown practiceId is a 404, not an upsert.
++      security:
++        - apiKeyAuth: []
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: "#/components/schemas/UpdateInternalPracticeRequest"
++      responses:
++        "200":
++          description: The updated practice record.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPractice"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    delete:
++      operationId: deletePractice
++      summary: Delete a practice record
++      description: Deletes one practice, leaving every other record intact.
++      security:
++        - apiKeyAuth: []
++      responses:
++        "204":
++          description: Practice deleted.
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    options:
++      summary: CORS preflight
++      description: Auto-generated preflight operation for Kong routing.
++      operationId: optionsInternalPracticesPracticeId
++      security: []
++      responses:
++        "204":
++          description: No Content
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++
+ components:
+   securitySchemes:
+     apiKeyAuth:
+-      type: apiKey
+-      in: header
+-      name: x-api-key
++      type: http
++      scheme: bearer
++      description: >
++        Shared API key passed as an HTTP Bearer token. Used for
++        server-to-server callers (e.g. the Hex ingest project) and the
++        dev-dashboard. Keys are allowlisted via the API_KEYS env var.
+ 
+   responses:
+     AuthenticationErrorResponse:
+@@ -101,6 +305,27 @@ components:
+           schema:
+             $ref: "#/components/schemas/InternalServerError"
+ 
++    NotFoundErrorResponse:
++      description: Not Found - The requested resource does not exist
++      content:
++        application/json:
++          schema:
++            $ref: "#/components/schemas/NotFoundError"
++
++    ConflictErrorResponse:
++      description: Conflict - The resource already exists
++      content:
++        application/json:
++          schema:
++            $ref: "#/components/schemas/ConflictError"
++
++    UnprocessableContentErrorResponse:
++      description: Unprocessable Content - The request contains validation errors
++      content:
++        application/json:
++          schema:
++            $ref: "#/components/schemas/UnprocessableContentError"
++
+   schemas:
+     ResponseError:
+       type: object
+@@ -147,3 +372,217 @@ components:
+           required:
+             - errorType
+             - message
++
++    NotFoundError:
++      allOf:
++        - $ref: "#/components/schemas/ResponseError"
++        - type: object
++          properties:
++            errorType:
++              type: string
++              maxLength: 100
++            message:
++              type: string
++              maxLength: 1000
++          required:
++            - errorType
++            - message
++
++    ConflictError:
++      allOf:
++        - $ref: "#/components/schemas/ResponseError"
++        - type: object
++          properties:
++            errorType:
++              type: string
++              maxLength: 100
++            message:
++              type: string
++              maxLength: 1000
++          required:
++            - errorType
++            - message
++
++    UnprocessableContentError:
++      allOf:
++        - $ref: "#/components/schemas/ResponseError"
++        - type: object
++          properties:
++            errorType:
++              type: string
++              maxLength: 100
++            message:
++              type: string
++              maxLength: 1000
++            issues:
++              type: array
++              maxItems: 50
++              items:
++                $ref: "#/components/schemas/ContentIssue"
++          required:
++            - errorType
++            - message
++            - issues
++
++    ContentIssue:
++      type: object
++      properties:
++        instancePath:
++          type: string
++          maxLength: 200
++          description: Path to the field that failed validation
++        code:
++          type: string
++          maxLength: 100
++          description: Validation error code
++        message:
++          type: string
++          maxLength: 500
++          description: Human-readable error message
++        params:
++          type: object
++          additionalProperties: true
++          description: Additional parameters related to the validation error
++      required:
++        - instancePath
++        - code
++        - message
++
++    PracticeStatus:
++      type: string
++      description: Engagement status of the practice.
++      enum:
++        - SOLD
++        - ONBOARDING
++        - STALLED_IN_ONBOARDING
++        - CHURNED
++        - OTHER
++
++    InternalPractice:
++      type: object
++      description: >
++        The full stored state of a practice. Optional attributes are omitted
++        when absent rather than returned as null.
++      properties:
++        id:
++          type: string
++          minLength: 1
++          maxLength: 100
++          description: Salesforce account id (upstream primary key).
++        name:
++          type: string
++          minLength: 1
++          maxLength: 255
++          description: Practice name.
++        status:
++          $ref: "#/components/schemas/PracticeStatus"
++        accountManager:
++          type: string
++          maxLength: 255
++          description: Name of the account manager assigned to this practice.
++        practiceEmail:
++          type: string
++          maxLength: 255
++          description: Contact email used by the monthly batch report send.
++        lastReferralDate:
++          type: string
++          format: date
++          maxLength: 10
++          description: Date of the most recent referral (YYYY-MM-DD).
++        createdAt:
++          type: string
++          format: date-time
++          maxLength: 40
++          description: Server-assigned creation timestamp.
++        updatedAt:
++          type: string
++          format: date-time
++          maxLength: 40
++          description: Server-assigned last-modified timestamp.
++      required:
++        - id
++        - name
++        - status
++        - createdAt
++        - updatedAt
++
++    InternalPracticeListResponse:
++      type: object
++      properties:
++        practices:
++          type: array
++          maxItems: 100
++          items:
++            $ref: "#/components/schemas/InternalPractice"
++        nextCursor:
++          type: string
++          maxLength: 4096
++          description: Present when more results remain; replay it to fetch the next page.
++      required:
++        - practices
++
++    CreateInternalPracticeRequest:
++      type: object
++      additionalProperties: false
++      description: >
++        createdAt and updatedAt are server-managed and rejected if supplied.
++      properties:
++        id:
++          type: string
++          minLength: 1
++          maxLength: 100
++          description: Salesforce account id (upstream primary key).
++        name:
++          type: string
++          minLength: 1
++          maxLength: 255
++          description: Practice name.
++        status:
++          $ref: "#/components/schemas/PracticeStatus"
++        accountManager:
++          type: string
++          minLength: 1
++          maxLength: 255
++        practiceEmail:
++          type: string
++          minLength: 1
++          maxLength: 255
++        lastReferralDate:
++          type: string
++          format: date
++          maxLength: 10
++      required:
++        - id
++        - name
++        - status
++
++    UpdateInternalPracticeRequest:
++      type: object
++      additionalProperties: false
++      minProperties: 1
++      description: >
++        Supply only the fields to change. Omitting a field leaves the stored
++        value untouched; null clears an optional field. id is the primary key
++        and cannot be changed, so it is rejected here.
++      properties:
++        name:
++          type: string
++          minLength: 1
++          maxLength: 255
++        status:
++          $ref: "#/components/schemas/PracticeStatus"
++        accountManager:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        practiceEmail:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        lastReferralDate:
++          type: string
++          format: date
++          maxLength: 10
++          nullable: true
+diff --git a/docs/tdds/dev-dashboard-internal-api.md b/docs/tdds/dev-dashboard-internal-api.md
+new file mode 100644
+index 00000000..f14e06ae
+--- /dev/null
++++ b/docs/tdds/dev-dashboard-internal-api.md
+@@ -0,0 +1,191 @@
++# Dev Dashboard: Internal API Entity Operations
++
++## Problem & Goals
++
++**Repos**: pathccm/attribution-service
++
++`apps/dev-dashboard` exists and works, but it can only do three things: ping `/readyz`, POST an ingest payload for practices, and POST one for referrals — each with a "delete everything" button beside it. There is no way to look at a single record, correct a bad field, or delete one row. The two ingest pages are near-identical copy-paste, each holding a hand-edited JSON blob in a textarea.
++
++The consequence is that every routine data question or fix in dev and prod-int goes through an engineer with AWS console access or a local script. "Why is this practice missing from the batch?" and "this practice's email is wrong" are both currently answered by reading DynamoDB directly. The blast radius is also wrong: the only mutation the dashboard offers is *wipe the entire table*.
++
++The internal API surface that should back this is `docs/openapi-internal.yaml`, and it is 149 lines containing exactly two operations — `deleteAllPcpReferrals` and `deleteAllPractices`. Everything else the dashboard calls (`POST /internal/practices/ingest`, `POST /internal/pcp-referrals/ingest`) is declared in the *public* `docs/openapi.yaml` despite living under an `/internal/` path.
++
++This document covers giving the dashboard full create/read/update/delete over both stored entities, plus a read-only preview of M2 batch cohort selection, with every operation declared in the internal spec so it is typed, documented, and covered by breaking-change detection.
++
++**Goals:**
++
++- An operator can create, find, inspect, edit, and delete individual `Practice` and `Referral` records in local, dev-int, and prod-int without DynamoDB console access.
++- An operator can see which practices the M2 monthly batch would select, and why each excluded practice was excluded, before a send goes out.
++- Every operation the dashboard performs is declared in `docs/openapi-internal.yaml` and reached through generated types — no hand-rolled paths, no operations that exist only in dashboard code.
++- The internal spec's declared auth matches what the server actually enforces.
++
++## Non-Goals
++
++**Repos**: pathccm/attribution-service
++
++- CRUD for `PracticeReportPublished`. Its repository exposes only `writePublishedRow` / `getPublishedRow`, and the M2 send ledger is an audit record of what was sent rather than an operator-editable entity — hand-editing it would falsify delivery history. Excluded deliberately.
++- Triggering an M2 batch run for a practice. `docs/tdds/m2-batch-pdf.md` is schedule-only by design and declares no API trigger; a per-practice trigger can send real PHI email and needs its own design and security review.
++- Re-driving a failed send. `docs/tdds/m2-batch-pdf.md`'s Non-Goals states "re-drives are operator-run"; contradicting that belongs in that document, not this one.
++- Wiring the dashboard to on-demand provider report PDF export. `docs/tdds/provider-report-pdf.md` is an unbuilt design — `getProviderReport` is absent from `docs/openapi.yaml`, no route handler exists, and `apps/api` does not depend on `packages/pdf-renderer` or `packages/practice-report`. It also requires that document's contested `CLAUDE.md` Runtime Isolation override. Revisit once that ships.
++- Deploying the dashboard. `apps/dev-dashboard/README.md` is explicit that it runs on developer laptops only, is absent from the `Dockerfile`, and is in `paths-ignore` for `deploy-eks.yml`. That stays true.
++- Auth0 `bearerAuth` routes. The dashboard reaches `apiKeyAuth` routes only.
++- Replacing the ingest pages. `POST /internal/*/ingest` keeps working as-is; moving those two declarations from the public spec into the internal spec is noted as an open question, not done here.
++- Server-side sorting and full-text search beyond the existing GSI-backed lookups.
++
++## Architecture
++
++**Repos**: pathccm/attribution-service
++
++### Existing surface this builds on
++
++`apps/api/src/server.ts:116-123` registers a **second** `fastify-openapi-glue` instance for the internal spec, with handlers resolved from `apps/api/src/routes/internal/` and Swagger UI mounted at `/internal-documentation` (`:149-160`). `apps/api/package.json:12` generates `src/generated/internal-types.ts` from the internal spec via `openapi-typescript`. The pattern for adding internal operations is therefore already established and needs no new infrastructure — `apps/api/src/routes/internal/practices.ts` is a 19-line reference implementation that delegates to `apps/api/src/service/practice-service`.
++
++Data access is the repository pattern in `packages/data/src/repository/`. `PracticeRepository` provides `getPractice`, `deletePractice`, `deleteAllPractices`, `listPractices`, `listPracticesByStatus`, `listPracticesByName`, `listPracticesByAccountManager`, and `listAccountManagers`. `ReferralRepository` provides `getReferral`, `deleteReferral`, `deleteAllReferrals`, `aggregatePracticeStats`, and list-by-practice / referrer / providerId / fullName. Both paginate as `{ <entities>, nextCursor }`.
++
++Read and delete are therefore already covered at the repository layer for both entities. Create and update are where the work is.
++
++### CRUD does not reuse the upsert methods
++
++The two existing `upsert` methods disagree about what an omitted field means, and neither is a good foundation for an operator edit form.
++
++`upsertPractice` (`packages/data/src/repository/practice-repository.ts:7-21`) conditionally spreads each optional field only when it is not `undefined`. ElectroDB's `upsert` compiles to a DynamoDB `UpdateItem`, so an omitted field retains its stored value — merge semantics, with no way to clear `practiceEmail`, `accountManager`, or `lastReferralDate` back to absent.
++
++`upsertReferral` (`packages/data/src/repository/referral-repository.ts:22-52`) does the opposite: after upserting the provided fields it issues a second `update().remove(...)` for every one of the twelve `OPTIONAL_FIELDS` the caller omitted (`:42-48`) — replace semantics, where an omitted field is actively deleted.
++
++**The CRUD surface does not use either.** Both `upsert` methods exist to serve the Hex ingest and are called from exactly two places — `apps/api/src/service/practice-service.ts:70` and `apps/api/src/service/pcp-referrals-service.ts:54`. They are left untouched, so the ingest path carries no regression risk from this work, and no reconciliation of their conflicting semantics is required.
++
++Instead, create and update are new explicit repository methods with unambiguous contracts:
++
++- **Create** fails if the `id` already exists, rather than silently overwriting. This is the operator-visible difference from ingest, which is intentionally idempotent.
++- **Update** applies only the fields supplied and leaves every other stored field alone. Clearing an optional field is an explicit act, not an inference from omission.
++
++This keeps the ambiguity contained to the ingest path where it is already load-bearing and tested, rather than propagating it into a UI.
++
++Clearing is represented as an **explicit `null` on the field**: an omitted field is left alone, and `"practiceEmail": null` removes it. Three consequences to design against:
++
++- Each nullable optional field is declared `type: [string, "null"]` in the internal spec, so AJV distinguishes absent from null at the route boundary rather than in handler code.
++- The repository translates a `null` into ElectroDB's `update().remove(...)`, since DynamoDB storing a literal null is not the same as the attribute being absent — and the guard predicates test absence (`hasPracticeContactEmail` checks `!= null` plus a trimmed-length check, `guards.ts:7-9`).
++- `accountManager` is both optional and the GSI3 partition key, so clearing it must remove the index entry rather than leave a key formatted from an empty string. This is the one clear case worth an explicit test.
++
++### Immutable identifiers and index composites
++
++`id` is the primary-key composite on both entities (`PracticeEntity` `byId`, `ReferralEntity` `byId`) and cannot be changed by an update — changing it means creating a new record and deleting the old one. Create must therefore accept an explicit `id`, and update must reject an attempted `id` change rather than silently ignoring it.
++
++Several mutable fields are **GSI partition keys**, which is what makes update non-trivial:
++
++- `Practice`: `name` (GSI2), `status` (GSI1), `accountManager` (GSI3).
++- `Referral`: `practiceName` (GSI1), `cleanReferrerName` (GSI2), `referringProviderId` (GSI4), `fullName` (GSI3).
++
++ElectroDB regenerates the index keys when these change, but it throws `IncompleteCompositeAttributes` unless every composite for each affected access pattern is supplied in the same call (`electrodb@3.9.1`, `src/entity.js:3353-3360`). Every index here is `pk: [thatField], sk: [id]`, so the required composites are the changed field plus `id` — satisfiable, but it means a partial update touching one of these fields is not a plain attribute write and needs deliberate handling.
++
++`accountManager` is optional *and* a GSI3 partition key, so clearing it has to leave the index in a coherent state. `createdAt` is `readOnly` on both entities; `updatedAt` carries `watch: "*"` and maintains itself.
++
++### Auth scheme correction
++
++`docs/openapi-internal.yaml:84-87` declares:
++
++```yaml
++apiKeyAuth:
++  type: apiKey
++  in: header
++  name: x-api-key
++```
++
++`docs/openapi.yaml:601-603` declares the **same scheme name** as `type: http, scheme: bearer`, and the actual handler `apps/api/src/security/api-key-auth.ts:6` reads `request.headers.authorization` and splits on a space. The dashboard sends `Authorization: Bearer <key>` (`apps/dev-dashboard/src/api/client.ts`). The internal spec's declaration is simply wrong: it describes a mechanism the server does not implement.
++
++Nothing is broken at runtime today because only two operations exist and the dashboard hardcodes the correct header. But every operation added under the current declaration inherits the wrong contract, and Swagger UI's "Try it out" against `/internal-documentation` sends the wrong header. This is corrected before new operations are added, not after.
++
++`docs/openapi-internal.yaml:13-16` also declares only the prod-int server, while the dashboard targets local (`http://localhost:3024`) and dev-int. Those are added.
++
++### Cohort preview and the app boundary
++
++M2's cohort selection lives in `apps/jobs/batch-runner/src/services/`, a **different app** from `apps/api`. `apps/api/package.json` has no dependency on batch-runner, batch-runner has no dependency on `apps/api`, and neither imports the other. The internal spec is served exclusively by `apps/api`, so a cohort-preview endpoint cannot call batch-runner's code as it stands.
++
++The relevant code is small and mostly pure:
++
++- `resolveCohort` (`apps/jobs/batch-runner/src/services/cohort.ts:8-35`) paginates `practiceRepository.listPracticesByStatus(PracticeStatus.SOLD, ...)` and emits two Datadog metrics. The selection logic is one repository call that `apps/api` can already make.
++- `evaluateGuards`, `hasPracticeContactEmail`, and `isPracticeOptedOut` (`apps/jobs/batch-runner/src/services/guards.ts:7-26`) are **pure functions of a `Practice`** — no I/O, no metrics, no logging. `emitPracticeSkipped` (`:31-38`) is the only infrastructure-touching function in the file, and a preview does not need it.
++- `SkipReason` (`apps/jobs/batch-runner/src/services/skip-reason.ts`) is a plain enum.
++
++The pure guard predicates, `SkipReason`, and the cohort-resolution logic are extracted into a shared workspace package consumed by both `apps/jobs/batch-runner` and `apps/api`, so preview and batch cannot drift. Duplicating the predicates into `apps/api` is explicitly rejected — a preview that disagrees with the batch it predicts is worse than no preview, because it will be trusted. The metric emission stays in batch-runner: a preview must not move batch counters. Package placement follows the `/add-package` checklist and the repo rule that each package is its own workspace, not a `common/` umbrella.
++
++The preview is **read-only**: it resolves the cohort, evaluates guards per practice, and reports proceed/skip with reasons. It renders no PDF, writes no ledger row, stages nothing to S3, and sends no email. It therefore does not touch `docs/tdds/m2-batch-pdf.md`'s Non-Goal on batch triggering.
++
++### The opt-out predicate reads a field that is not stored
++
++`isPracticeOptedOut` reads `(practice as PracticeWithGuardFields).optedOut`, and `optedOut` is **not an attribute on `PracticeEntity`** — `apps/jobs/batch-runner/src/services/types.ts:4-5` declares it as a phantom field on a cast type, with a `TODO(NEV-1412)` noting the real predicate has not landed. NEV-1412 is closed `Wont fix`.
++
++The predicate is extracted as-is; correcting it is not in scope here. The consequence is that preview reports `OPTED_OUT` for zero practices, because the field it reads never exists on a stored record — and that is exactly what the batch does today, so preview remains a faithful prediction of batch behavior. Preview must not imply it verified opt-out status.
++
++Note the interaction with practice editing: because `optedOut` is not a declared entity attribute, it is not an editable field in this work either. An operator cannot mark a practice opted-out through the dashboard, and adding that field is separate, unowned work.
++
++### PHI handling
++
++`Referral` records carry `fullName`, `mobile`, `email`, and per-patient stage data. The dashboard already forbids persisting request or response bodies to `localStorage`, IndexedDB, or logs (`apps/dev-dashboard/README.md:83-84`) while storing the API key per-environment. That constraint extends unchanged to every new page.
++
++Two things do change in degree. Referral list and detail views put more PHI on screen at once than today's single-record ingest echo. And this work introduces operator-authored *writes* to patient-adjacent records where previously only bulk ingest and bulk delete existed. Neither is a new class of data nor a new trust boundary — the same already-authenticated internal operator, over VPN, through the same `apiKeyAuth` scheme — but referral mutation is the highest-consequence surface in this document and warrants explicit confirmation in the UI for destructive and replace operations.
++
++`Practice` records carry `practiceEmail`, which is business contact data rather than patient data.
++
++### Referral edits and ingest overwrites
++
++Referrals are derived from the Hex ingest. A hand-edited referral is not durable: the next ingest run upserts the same `id` and overwrites operator changes. This is accepted — the purpose is manual manipulation for testing and correction, not a durable system of record — but the UI should not imply permanence, and this is worth stating in the AC rather than discovering later.
++
++### Conventions to follow, and one to avoid
++
++`pathccm/employer-backend` is the reference for this shape and supplies three patterns worth copying:
++
++- One component triplet per entity — `XList` / `XDetail` / `CreateXForm` (plus a delete confirmation dialog) — rather than one page per endpoint.
++- A `test.each` auth matrix over every `[method, url]` pair asserting 401 for a missing key and 401 for a wrong key, asserting on the error envelope's `errorType` discriminator.
++- Spec-as-contract tests that fetch the served `/internal-documentation/json` and assert the operation is actually registered, so a missing glue wiring fails a test rather than 404ing in someone's browser.
++
++One employer-backend trait to **not** copy: its operational actions (backfill, dev reset, seeding) live entirely outside its OpenAPI spec, so they are excluded from type generation and breaking-change detection, and it now carries two parallel internal surfaces (specced `/internal/*` and unspecced legacy `/admin/*`) that its own UI labels inconsistently. Every operation here is declared in the internal spec — that is the point of this document.
++
++Also note `docs/openapi-internal.yaml` is currently absent from Spectral linting; the root `openapi-lint` task targets the public spec only.
++
++## Capabilities
++
++### Manage practice records
++
++**Repos**: pathccm/attribution-service
++
++An operator can create a practice, search existing ones by name, status, or account manager, open one to see its full stored state, edit its fields — including the GSI-backed `name`, `status`, and `accountManager` — and delete that single record.
++
++Creating a practice whose `id` already exists is rejected rather than silently overwriting it. Editing leaves unsubmitted fields intact, and clearing an optional field is possible but explicit. Deleting one practice is distinct from the existing `deleteAllPractices`, which stays as-is behind its confirmation.
++
++### Manage referral records
++
++**Repos**: pathccm/attribution-service
++
++An operator can create a referral, look one up by practice, referrer, referring provider, or patient name, page through results, open a single referral to see its full stored state including lead type and stage fields, edit any of them, and delete an individual record.
++
++Referrals carry twelve optional fields, so the guarantee that an edit touches only what was submitted matters more here than anywhere else: editing one stage field must not disturb `mobile`, `email`, `networkName`, `insuranceCarrier`, or the rest.
++
++### Preview the monthly batch cohort
++
++**Repos**: pathccm/attribution-service
++
++An operator can see, before a monthly send, which Active Sold practices the batch would select and which would be skipped with which reason — so a coverage shortfall is caught by inspection rather than discovered from the delivery numbers afterward. Read-only; renders nothing, sends nothing, and moves no batch metrics. Reports the opt-out limitation rather than implying opt-out was checked.
++
++## Resolved Questions
++
++**Repos**: pathccm/attribution-service
++
++- **Which entities get a mutable surface?** `Practice` and `Referral`, both full CRUD. `PracticeReportPublished` is excluded — see Non-Goals.
++- **Referral editing, given ingest overwrites it?** In scope. Manual manipulation is the goal; impermanence is accepted and stated.
++- **Reuse the existing `upsert` methods for CRUD?** No. They serve the Hex ingest, have mutually inconsistent omitted-field semantics, and are left untouched. CRUD gets explicit create and update methods, so their conflicting behavior needs no reconciliation and the ingest path carries no regression risk.
++- **How is clearing an optional field represented?** Explicit `null` on the field; omission means leave alone. Declared as a nullable type in the spec so validation happens at the route boundary, and translated to ElectroDB `remove` so the attribute is genuinely absent rather than stored as null.
++- **Fix the auth mismatch here, or separately?** Here, before new operations are added, so they do not inherit a wrong contract.
++- **Duplicate the guard predicates into `apps/api`?** No — extract to a shared package. A preview that can drift from the batch it predicts is actively misleading.
++- **Fix the opt-out stub as part of this?** No. Extract it as-is so preview matches batch behavior exactly; the missing entity attribute is separate work.
++- **Does cohort preview contradict M2's Non-Goals?** No. M2 excludes triggering sends and re-driving failures. A read-only preview that renders and sends nothing is neither.
++
++## Open Questions
++
++**Repos**: pathccm/attribution-service
++
++- Should `POST /internal/practices/ingest` and `POST /internal/pcp-referrals/ingest` move from `docs/openapi.yaml` into the internal spec? They are `/internal/`-pathed but publicly declared. Moving them is a breaking change to the published spec and may affect the Hex ingest caller.
++- Should `docs/openapi-internal.yaml` be added to Spectral linting? It is unlinted today, so naming-convention drift between the two specs is not caught.
++- Should creating a referral through the dashboard validate against the same schema the Hex ingest uses, or accept looser input for test-fixture purposes?
++- Should cohort preview accept a practice-status or account-manager filter, or always preview the full Active Sold cohort?
++- Pagination convention: repositories default to `limit = 25`. Is that the right page size for an operator UI, and should the dashboard paginate server-side or fetch-and-filter client-side as employer-backend's employer list does?
+diff --git a/packages/data/src/__tests__/repository/practice-repository.test.ts b/packages/data/src/__tests__/repository/practice-repository.test.ts
+index edbf986c..ac2cc7c8 100644
+--- a/packages/data/src/__tests__/repository/practice-repository.test.ts
++++ b/packages/data/src/__tests__/repository/practice-repository.test.ts
+@@ -1,4 +1,5 @@
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { ConflictError } from "../../errors";
+ import type { PracticeStatus } from "../../model";
+ import { PracticeRepository } from "../../repository/practice-repository";
+ import { clearAllItems } from "../../test-utils";
+@@ -347,4 +348,161 @@ describe("PracticeRepository", () => {
+       expect(result).toContain("Alice Smith");
+     });
+   });
++
++  describe("createPractice", () => {
++    it("persists a new practice with server-assigned timestamps", async () => {
++      const created = await repo.createPractice(BASE_PRACTICE);
++
++      expect(created.id).toBe("ACCT-001");
++      expect(created.name).toBe("Smith Family Practice");
++      expect(created.status).toBe("SOLD");
++      expect(created.createdAt).toBeInstanceOf(Date);
++      expect(created.updatedAt).toBeInstanceOf(Date);
++
++      const fetched = await repo.getPractice("ACCT-001");
++      expect(fetched?.name).toBe("Smith Family Practice");
++    });
++
++    it("rejects a duplicate id without mutating the stored record", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await expect(
++        repo.createPractice({ ...BASE_PRACTICE, name: "Impostor Practice" }),
++      ).rejects.toThrow(ConflictError);
++
++      const fetched = await repo.getPractice("ACCT-001");
++      expect(fetched?.name).toBe("Smith Family Practice");
++    });
++
++    it("makes the record findable via the account-manager GSI", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      const result = await repo.listPracticesByAccountManager("Jordan Lee");
++      expect(result.practices.map((p) => p.id)).toContain("ACCT-001");
++    });
++
++    it("omits optional fields that were not supplied", async () => {
++      const created = await repo.createPractice({
++        id: "p-minimal",
++        name: "Minimal Practice",
++        status: "SOLD",
++      });
++
++      expect(created.accountManager).toBeUndefined();
++      expect(created.practiceEmail).toBeUndefined();
++      expect(created.lastReferralDate).toBeUndefined();
++    });
++  });
++
++  describe("patchPractice", () => {
++    it("applies only the supplied field and leaves the rest unchanged", async () => {
++      const created = await repo.createPractice({
++        ...BASE_PRACTICE,
++        practiceEmail: "front-desk@smith.example",
++        lastReferralDate: "2026-05-15",
++      });
++
++      const patched = await repo.patchPractice("ACCT-001", { status: "CHURNED" });
++
++      expect(patched).toEqual({
++        ...created,
++        status: "CHURNED",
++        updatedAt: patched?.updatedAt,
++      });
++    });
++
++    it("returns null for a missing id and creates nothing", async () => {
++      const result = await repo.patchPractice("does-not-exist", { name: "Ghost Practice" });
++
++      expect(result).toBeNull();
++      expect(await repo.getPractice("does-not-exist")).toBeNull();
++    });
++
++    it("removes an optional attribute when the field is null, rather than storing null", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: "front-desk@smith.example" });
++
++      const patched = await repo.patchPractice("ACCT-001", { practiceEmail: null });
++
++      expect(patched?.practiceEmail).toBeUndefined();
++      expect(patched && "practiceEmail" in patched).toBe(false);
++    });
++
++    it("drops the GSI3 entry when accountManager is cleared", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++      const before = await repo.listPracticesByAccountManager("Jordan Lee");
++      expect(before.practices.map((p) => p.id)).toContain("ACCT-001");
++
++      await repo.patchPractice("ACCT-001", { accountManager: null });
++
++      const after = await repo.listPracticesByAccountManager("Jordan Lee");
++      expect(after.practices.map((p) => p.id)).not.toContain("ACCT-001");
++      expect(await repo.getPractice("ACCT-001")).not.toBeNull();
++    });
++
++    it("moves the GSI2 partition when name changes", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await repo.patchPractice("ACCT-001", { name: "Smith Family Health" });
++
++      const byOldName = await repo.listPracticesByName("Smith Family Practice");
++      expect(byOldName.practices.map((p) => p.id)).not.toContain("ACCT-001");
++
++      const byNewName = await repo.listPracticesByName("Smith Family Health");
++      expect(byNewName.practices.map((p) => p.id)).toContain("ACCT-001");
++    });
++
++    it("moves the GSI1 partition when status changes", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await repo.patchPractice("ACCT-001", { status: "CHURNED" });
++
++      const sold = await repo.listPracticesByStatus("SOLD");
++      expect(sold.practices.map((p) => p.id)).not.toContain("ACCT-001");
++
++      const churned = await repo.listPracticesByStatus("CHURNED");
++      expect(churned.practices.map((p) => p.id)).toContain("ACCT-001");
++    });
++
++    it("moves the GSI3 partition when accountManager changes to a new value", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await repo.patchPractice("ACCT-001", { accountManager: "Casey Kim" });
++
++      const oldAm = await repo.listPracticesByAccountManager("Jordan Lee");
++      expect(oldAm.practices.map((p) => p.id)).not.toContain("ACCT-001");
++
++      const newAm = await repo.listPracticesByAccountManager("Casey Kim");
++      expect(newAm.practices.map((p) => p.id)).toContain("ACCT-001");
++    });
++
++    it("advances updatedAt and preserves createdAt", async () => {
++      const created = await repo.createPractice(BASE_PRACTICE);
++      await new Promise((resolve) => setTimeout(resolve, 25));
++
++      const patched = await repo.patchPractice("ACCT-001", { name: "Renamed" });
++
++      expect(patched?.createdAt.getTime()).toBe(created.createdAt.getTime());
++      expect(patched?.updatedAt.getTime()).toBeGreaterThan(created.updatedAt.getTime());
++    });
++
++    it("leaves a stored value in place when its key is omitted — omission is not a clear", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: "front-desk@smith.example" });
++
++      const patched = await repo.patchPractice("ACCT-001", { name: "Renamed" });
++
++      expect(patched?.practiceEmail).toBe("front-desk@smith.example");
++    });
++
++    it("sets one field and clears another in a single patch", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: "front-desk@smith.example" });
++
++      const patched = await repo.patchPractice("ACCT-001", {
++        name: "Smith Family Health",
++        practiceEmail: null,
++      });
++
++      expect(patched?.name).toBe("Smith Family Health");
++      expect(patched?.practiceEmail).toBeUndefined();
++    });
++  });
+ });
+diff --git a/packages/data/src/__tests__/repository/referral-repository.test.ts b/packages/data/src/__tests__/repository/referral-repository.test.ts
+index 24991ec7..341a59ed 100644
+--- a/packages/data/src/__tests__/repository/referral-repository.test.ts
++++ b/packages/data/src/__tests__/repository/referral-repository.test.ts
+@@ -1,4 +1,5 @@
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { ConflictError } from "../../errors";
+ import { ReferralRepository } from "../../repository/referral-repository";
+ import { clearAllItems } from "../../test-utils";
+ 
+@@ -381,4 +382,123 @@ describe("ReferralRepository", () => {
+       expect(stats["Smith Family Practice"]?.referringProviderCount).toBe(1);
+     });
+   });
++
++  describe("createReferral", () => {
++    it("persists all required and supplied optional fields", async () => {
++      const created = await repo.createReferral({
++        ...BASE_REFERRAL,
++        therapyLeadStage: "LEAD",
++        psychLeadStage: "CONTACT",
++      });
++
++      expect(created).toMatchObject({
++        ...BASE_REFERRAL,
++        therapyLeadStage: "LEAD",
++        psychLeadStage: "CONTACT",
++      });
++      expect(created.createdAt).toBeInstanceOf(Date);
++      expect(created.updatedAt).toBeInstanceOf(Date);
++    });
++
++    it("rejects a duplicate id without mutating the stored record", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      await expect(
++        repo.createReferral({ ...BASE_REFERRAL, fullName: "Impostor Name" }),
++      ).rejects.toThrow(ConflictError);
++
++      const fetched = await repo.getReferral(BASE_REFERRAL.id);
++      expect(fetched?.fullName).toBe("Jane Doe");
++    });
++
++    it("is findable under all four GSIs", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      const byPractice = await repo.listReferralsByPractice("Smith Family Practice");
++      const byReferrer = await repo.listReferralsByReferrer("Dr. Smith");
++      const byFullName = await repo.listReferralsByFullName("Jane Doe");
++      const byProviderId = await repo.listReferralsByProviderId(
++        "a0b1c2d3-e4f5-5000-8000-000000000001",
++      );
++
++      expect(byPractice.referrals.map((r) => r.id)).toContain("abc123");
++      expect(byReferrer.referrals.map((r) => r.id)).toContain("abc123");
++      expect(byFullName.referrals.map((r) => r.id)).toContain("abc123");
++      expect(byProviderId.referrals.map((r) => r.id)).toContain("abc123");
++    });
++  });
++
++  describe("patchReferral", () => {
++    it("leaves every other field byte-identical when one stage field is patched", async () => {
++      const created = await repo.createReferral({
++        ...BASE_REFERRAL,
++        therapyLeadStage: "LEAD",
++        psychLeadStage: "LEAD",
++        therapyLeadSubstage: "vob_failed",
++      });
++
++      const patched = await repo.patchReferral("abc123", { therapyLeadStage: "SCHEDULED" });
++
++      expect(patched).toEqual({
++        ...created,
++        therapyLeadStage: "SCHEDULED",
++        updatedAt: patched?.updatedAt,
++      });
++    });
++
++    it("returns null for a missing id and creates nothing", async () => {
++      const result = await repo.patchReferral("does-not-exist", { fullName: "Ghost" });
++
++      expect(result).toBeNull();
++      expect(await repo.getReferral("does-not-exist")).toBeNull();
++    });
++
++    it("removes only the nulled optional field, leaving the other optionals intact", async () => {
++      const created = await repo.createReferral(BASE_REFERRAL);
++
++      const patched = await repo.patchReferral("abc123", { mobile: null });
++
++      expect(patched?.mobile).toBeUndefined();
++      expect(patched && "mobile" in patched).toBe(false);
++      expect(patched).toEqual({
++        ...created,
++        mobile: undefined,
++        updatedAt: patched?.updatedAt,
++      });
++    });
++
++    it("moves GSI1 when practiceName changes", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      await repo.patchReferral("abc123", { practiceName: "Jones Family Practice" });
++
++      const byOld = await repo.listReferralsByPractice("Smith Family Practice");
++      expect(byOld.referrals.map((r) => r.id)).not.toContain("abc123");
++
++      const byNew = await repo.listReferralsByPractice("Jones Family Practice");
++      expect(byNew.referrals.map((r) => r.id)).toContain("abc123");
++    });
++
++    it("moves GSI3 when fullName changes", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      await repo.patchReferral("abc123", { fullName: "Jane Roe" });
++
++      const byOld = await repo.listReferralsByFullName("Jane Doe");
++      expect(byOld.referrals.map((r) => r.id)).not.toContain("abc123");
++
++      const byNew = await repo.listReferralsByFullName("Jane Roe");
++      expect(byNew.referrals.map((r) => r.id)).toContain("abc123");
++    });
++
++    it("advances updatedAt and preserves createdAt", async () => {
++      const created = await repo.createReferral(BASE_REFERRAL);
++      await new Promise((resolve) => setTimeout(resolve, 25));
++
++      const patched = await repo.patchReferral("abc123", { fullName: "Jane Roe" });
++
++      expect(patched?.createdAt.getTime()).toBe(created.createdAt.getTime());
++      expect(patched?.updatedAt.getTime()).toBeGreaterThan(created.updatedAt.getTime());
++    });
++  });
+ });
+diff --git a/packages/data/src/errors.ts b/packages/data/src/errors.ts
+index 8b6dc77c..4c789039 100644
+--- a/packages/data/src/errors.ts
++++ b/packages/data/src/errors.ts
+@@ -11,3 +11,13 @@ export class NotFoundError extends Error {
+     this.name = "NotFoundError";
+   }
+ }
++
++/**
++ * Thrown when a create would overwrite an existing record
++ */
++export class ConflictError extends Error {
++  constructor(message = "Resource already exists") {
++    super(message);
++    this.name = "ConflictError";
++  }
++}
+diff --git a/packages/data/src/repository/patch-fields.ts b/packages/data/src/repository/patch-fields.ts
+new file mode 100644
+index 00000000..019f856b
+--- /dev/null
++++ b/packages/data/src/repository/patch-fields.ts
+@@ -0,0 +1,31 @@
++/**
++ * Patch semantics shared by the practice and referral repositories:
++ * an explicit `null` clears the attribute, an omitted key leaves it alone.
++ * This is deliberately different from the `upsert*` ingest methods, where
++ * omission can mean "wipe" (see upsertReferral).
++ */
++
++/** Keys whose value may be `null`, i.e. the attributes a patch is allowed to clear. */
++type NullableKeys<T> = { [K in keyof T]-?: null extends T[K] ? K : never }[keyof T];
++
++type SettableFields<T> = { [K in keyof T]?: Exclude<T[K], null> };
++
++export function splitPatchFields<T extends Record<string, unknown>>(
++  fields: T,
++): { toSet: SettableFields<T>; toRemove: (NullableKeys<T> & string)[] } {
++  const toSet: Record<string, unknown> = {};
++  const toRemove: string[] = [];
++
++  for (const [key, value] of Object.entries(fields)) {
++    if (value === null) {
++      toRemove.push(key);
++    } else if (value !== undefined) {
++      toSet[key] = value;
++    }
++  }
++
++  return {
++    toSet: toSet as SettableFields<T>,
++    toRemove: toRemove as (NullableKeys<T> & string)[],
++  };
++}
+diff --git a/packages/data/src/repository/practice-repository.ts b/packages/data/src/repository/practice-repository.ts
+index d60ca099..1aaef1e3 100644
+--- a/packages/data/src/repository/practice-repository.ts
++++ b/packages/data/src/repository/practice-repository.ts
+@@ -1,9 +1,44 @@
+ import type { EntityItem } from "electrodb";
++import { ConflictError } from "../errors";
+ import type { Practice } from "../model";
+ import { PracticeEntity } from "../model";
+-import type { IPracticeRepository } from "./types";
++import { splitPatchFields } from "./patch-fields";
++import type { CreatePracticeInput, IPracticeRepository, PatchPracticeFields } from "./types";
+ 
+ export class PracticeRepository implements IPracticeRepository {
++  async createPractice(practice: CreatePracticeInput): Promise<Practice> {
++    const result = await PracticeEntity.create(practice).go({
++      returnOnConditionCheckFailure: true,
++    });
++
++    if ("rejected" in result && result.rejected) {
++      throw new ConflictError(`Practice ${practice.id} already exists`);
++    }
++
++    // biome-ignore lint/style/noNonNullAssertion: create() succeeded, so the item exists
++    return (await this.getPractice(practice.id))!;
++  }
++
++  async patchPractice(id: string, fields: PatchPracticeFields): Promise<Practice | null> {
++    const { toSet, toRemove } = splitPatchFields(fields);
++
++    if (Object.keys(toSet).length === 0 && toRemove.length === 0) {
++      return this.getPractice(id);
++    }
++
++    let operation = PracticeEntity.patch({ id }).set(toSet);
++    if (toRemove.length > 0) {
++      operation = operation.remove(toRemove);
++    }
++
++    const result = await operation.go({ returnOnConditionCheckFailure: true });
++    if ("rejected" in result && result.rejected) {
++      return null;
++    }
++
++    return this.getPractice(id);
++  }
++
+   async upsertPractice(practice: Omit<Practice, "createdAt" | "updatedAt">): Promise<Practice> {
+     await PracticeEntity.upsert({
+       id: practice.id,
+diff --git a/packages/data/src/repository/referral-repository.ts b/packages/data/src/repository/referral-repository.ts
+index 850892cc..5322a676 100644
+--- a/packages/data/src/repository/referral-repository.ts
++++ b/packages/data/src/repository/referral-repository.ts
+@@ -1,7 +1,9 @@
+ import type { EntityItem } from "electrodb";
++import { ConflictError } from "../errors";
+ import type { PracticeStats, Referral } from "../model";
+ import { ReferralEntity } from "../model";
+-import type { IReferralRepository } from "./types";
++import { splitPatchFields } from "./patch-fields";
++import type { CreateReferralInput, IReferralRepository, PatchReferralFields } from "./types";
+ 
+ const OPTIONAL_FIELDS = [
+   "mobile",
+@@ -51,6 +53,39 @@ export class ReferralRepository implements IReferralRepository {
+     return (await this.getReferral(referral.id))!;
+   }
+ 
++  async createReferral(referral: CreateReferralInput): Promise<Referral> {
++    const result = await ReferralEntity.create(referral).go({
++      returnOnConditionCheckFailure: true,
++    });
++
++    if ("rejected" in result && result.rejected) {
++      throw new ConflictError(`Referral ${referral.id} already exists`);
++    }
++
++    // biome-ignore lint/style/noNonNullAssertion: create() succeeded, so the item exists
++    return (await this.getReferral(referral.id))!;
++  }
++
++  async patchReferral(id: string, fields: PatchReferralFields): Promise<Referral | null> {
++    const { toSet, toRemove } = splitPatchFields(fields);
++
++    if (Object.keys(toSet).length === 0 && toRemove.length === 0) {
++      return this.getReferral(id);
++    }
++
++    let operation = ReferralEntity.patch({ id }).set(toSet);
++    if (toRemove.length > 0) {
++      operation = operation.remove(toRemove);
++    }
++
++    const result = await operation.go({ returnOnConditionCheckFailure: true });
++    if ("rejected" in result && result.rejected) {
++      return null;
++    }
++
++    return this.getReferral(id);
++  }
++
+   async getReferral(id: string): Promise<Referral | null> {
+     const response = await ReferralEntity.get({ id }).go();
+     if (!response.data) {
+diff --git a/packages/data/src/repository/types.ts b/packages/data/src/repository/types.ts
+index 796ba8da..ee7fb267 100644
+--- a/packages/data/src/repository/types.ts
++++ b/packages/data/src/repository/types.ts
+@@ -1,14 +1,41 @@
+ import type {
+   AuditPayload,
++  PatchFields,
+   PdfRef,
+   Practice,
++  PracticeEntity,
+   PracticeReportPublished,
+   PracticeStats,
+   PublishStatus,
+   Referral,
++  ReferralEntity,
+   ReportType,
++  UpsertFields,
+ } from "../model";
+ 
++/**
++ * `createdAt`/`updatedAt` are set by the entity definition, never by a caller.
++ */
++type AutoSetTimestamps = "createdAt" | "updatedAt";
++
++export type CreatePracticeInput = UpsertFields<Practice, typeof PracticeEntity, AutoSetTimestamps>;
++export type CreateReferralInput = UpsertFields<Referral, typeof ReferralEntity, AutoSetTimestamps>;
++
++/**
++ * Patch inputs allow `null` to clear an optional attribute; omitting a key
++ * leaves the stored value alone.
++ */
++export type PatchPracticeFields = NullableOptional<
++  Omit<PatchFields<Practice, typeof PracticeEntity, AutoSetTimestamps>, "id">
++>;
++export type PatchReferralFields = NullableOptional<
++  Omit<PatchFields<Referral, typeof ReferralEntity, AutoSetTimestamps>, "id">
++>;
++
++type NullableOptional<T> = {
++  [K in keyof T]?: undefined extends T[K] ? T[K] | null : T[K];
++};
++
+ export interface WritePublishedRowInput {
+   practiceId: string;
+   sfAccountId: string;
+@@ -32,6 +59,9 @@ export interface IPracticeReportPublishedRepository {
+ 
+ export interface IPracticeRepository {
+   upsertPractice(practice: Omit<Practice, "createdAt" | "updatedAt">): Promise<Practice>;
++  createPractice(practice: CreatePracticeInput): Promise<Practice>;
++  /** Resolves `null` when no practice with `id` exists — patch never creates. */
++  patchPractice(id: string, fields: PatchPracticeFields): Promise<Practice | null>;
+   getPractice(id: string): Promise<Practice | null>;
+   deletePractice(id: string): Promise<boolean>;
+   deleteAllPractices(): Promise<number>;
+@@ -59,6 +89,9 @@ export interface IPracticeRepository {
+ 
+ export interface IReferralRepository {
+   upsertReferral(referral: Omit<Referral, "createdAt" | "updatedAt">): Promise<Referral>;
++  createReferral(referral: CreateReferralInput): Promise<Referral>;
++  /** Resolves `null` when no referral with `id` exists — patch never creates. */
++  patchReferral(id: string, fields: PatchReferralFields): Promise<Referral | null>;
+   getReferral(id: string): Promise<Referral | null>;
+   deleteReferral(id: string): Promise<boolean>;
+   deleteAllReferrals(): Promise<number>;

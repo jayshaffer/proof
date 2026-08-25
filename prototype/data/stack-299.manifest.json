@@ -1,0 +1,24 @@
+{
+  "repo": "pathccm/attribution-service",
+  "base": "main",
+  "topPr": 299,
+  "planFile": "dev-dashboard-internal-api.plan.md",
+  "epic": {
+    "badge": "TDD",
+    "src": "docs/tdds/dev-dashboard-internal-api.md",
+    "title": "Dev Dashboard: Internal API Entity Operations",
+    "note": "Single slice — #299 (referral CRUD) is one PR on main, a rebase of the reviewed #219; the practice-CRUD groundwork it mirrors (#293) is already merged. Not a multi-PR stack.",
+    "goal": "Operators need to inspect and correct individual referral records without DynamoDB console access. This slice adds typed create / read / update / delete over the PHI-carrying <code>Referral</code> entity, declared in the internal OpenAPI spec and implemented against the merged repository — the referral counterpart to the practice CRUD."
+  },
+  "layers": [
+    {
+      "pr": 299,
+      "ticket": "NEV-1539-referrals",
+      "ledger": "pr-299.ledger.jsonl",
+      "phase": "referrals",
+      "summary": "Five internal PCP referral CRUD endpoints for the PHI-carrying entity, declared in the internal OpenAPI spec and implemented against the merged repository. Headline finding: AJV silently refuses <code>null</code> on <code>type+enum+nullable:true</code> enum fields, so the two nullable stage fields use <code>anyOf</code> instead.",
+      "capability": "Manage referral records — API",
+      "acids": ["RR-4", "RR-6", "RU-1", "RU-4", "RC-3", "RD-4", "RP-4"]
+    }
+  ]
+}

@@ -1,0 +1,1561 @@
+diff --git a/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+index e323280d..e25bb177 100644
+--- a/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
++++ b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+@@ -58,15 +58,21 @@ describe("internal auth matrix", () => {
+   test("discovers the internal surface from the spec", () => {
+     expect(authenticated.map((o) => `${o.method} ${o.url}`).sort()).toEqual([
+       "DELETE /internal/pcp-referrals",
++      "DELETE /internal/pcp-referrals/{referralId}",
+       "DELETE /internal/practices",
+       "DELETE /internal/practices/{practiceId}",
++      "GET /internal/pcp-referrals",
++      "GET /internal/pcp-referrals/{referralId}",
+       "GET /internal/practices",
+       "GET /internal/practices/{practiceId}",
++      "PATCH /internal/pcp-referrals/{referralId}",
+       "PATCH /internal/practices/{practiceId}",
++      "POST /internal/pcp-referrals",
+       "POST /internal/practices",
+     ]);
+     expect(preflight.map((o) => `${o.method} ${o.url}`).sort()).toEqual([
+       "OPTIONS /internal/pcp-referrals",
++      "OPTIONS /internal/pcp-referrals/{referralId}",
+       "OPTIONS /internal/practices",
+       "OPTIONS /internal/practices/{practiceId}",
+     ]);
+diff --git a/apps/api/src/__tests__/routes/internal-pcp-referrals-crud.test.ts b/apps/api/src/__tests__/routes/internal-pcp-referrals-crud.test.ts
+new file mode 100644
+index 00000000..5ef87b3d
+--- /dev/null
++++ b/apps/api/src/__tests__/routes/internal-pcp-referrals-crud.test.ts
+@@ -0,0 +1,352 @@
++import { clearAllItems, referralRepository } from "@attribution-service/data";
++import { afterEach, describe, expect, test, vi } from "vitest";
++import { useServerHelper } from "../util";
++
++vi.mock("../../config");
++
++const AUTH_HEADER = { authorization: "Bearer valid-test-key" };
++
++/** Every optional field populated, so a patch that disturbs one is visible. */
++const FULL_BODY = {
++  id: "abc123",
++  leadId: "SF-LEAD-001",
++  fullName: "Jane Doe",
++  mobile: "555-111-2222",
++  email: "jane@example.com",
++  cleanReferrerName: "Dr. Smith",
++  referringProviderId: "a0b1c2d3-e4f5-5000-8000-000000000001",
++  networkName: "Blue Shield",
++  insuranceCarrier: "BCBS",
++  utmSource: "pcp",
++  practiceName: "Smith Family Practice",
++  practiceOwnerName: "Dr. Smith",
++  practiceAccountId: "ACCT-001",
++  sourceRunId: "hex-run-001",
++  producedAt: "2026-07-13T00:00:00Z",
++  createdDate: "2026-07-01T00:00:00Z",
++  therapyOrPsychLead: "THERAPY_ONLY" as const,
++  therapyLeadStage: "LEAD" as const,
++  psychLeadStage: "CONTACT" as const,
++  therapyLeadSubstage: "vob_failed",
++};
++
++describe("internal PCP referrals CRUD", () => {
++  const serverHelper = useServerHelper();
++
++  afterEach(async () => {
++    await clearAllItems();
++  });
++
++  const post = (payload: unknown) =>
++    serverHelper.getServer().inject({
++      method: "POST",
++      url: "/internal/pcp-referrals",
++      headers: AUTH_HEADER,
++      payload,
++    });
++
++  const get = (url: string) =>
++    serverHelper.getServer().inject({ method: "GET", url, headers: AUTH_HEADER });
++
++  const patch = (id: string, payload: unknown) =>
++    serverHelper.getServer().inject({
++      method: "PATCH",
++      url: `/internal/pcp-referrals/${id}`,
++      headers: AUTH_HEADER,
++      payload,
++    });
++
++  const del = (url: string) =>
++    serverHelper.getServer().inject({ method: "DELETE", url, headers: AUTH_HEADER });
++
++  describe("POST /internal/pcp-referrals", () => {
++    test("valid body returns 201 with the stored record", async () => {
++      const res = await post(FULL_BODY);
++
++      expect(res.statusCode).toBe(201);
++      expect(res.json()).toMatchObject(FULL_BODY);
++      expect(typeof res.json().createdAt).toBe("string");
++    });
++
++    test("duplicate id returns 409 ConflictError and leaves the record unmodified", async () => {
++      await post(FULL_BODY);
++
++      const res = await post({ ...FULL_BODY, fullName: "Impostor Name" });
++
++      expect(res.statusCode).toBe(409);
++      expect(res.json()).toMatchObject({ errorType: "ConflictError" });
++      expect((await get("/internal/pcp-referrals/abc123")).json().fullName).toBe("Jane Doe");
++    });
++
++    test("missing a required field returns 422 naming it in issues", async () => {
++      const { practiceName, ...withoutPracticeName } = FULL_BODY;
++
++      const res = await post(withoutPracticeName);
++
++      expect(res.statusCode).toBe(422);
++      const body = res.json();
++      expect(body.errorType).toBe("UnprocessableContentError");
++      expect(JSON.stringify(body.issues)).toContain("practiceName");
++    });
++
++    test("therapyOrPsychLead outside LeadType returns 422", async () => {
++      const res = await post({ ...FULL_BODY, therapyOrPsychLead: "NOT_A_LEAD_TYPE" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("therapyLeadStage outside LeadStage returns 422", async () => {
++      const res = await post({ ...FULL_BODY, therapyLeadStage: "NOT_A_STAGE" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("supplying server-managed createdAt returns 422", async () => {
++      const res = await post({ ...FULL_BODY, createdAt: "2020-01-01T00:00:00.000Z" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("created referral is findable under all four GSIs", async () => {
++      await post(FULL_BODY);
++
++      const byPractice = await get(
++        "/internal/pcp-referrals?practiceName=Smith%20Family%20Practice",
++      );
++      const byReferrer = await get("/internal/pcp-referrals?cleanReferrerName=Dr.%20Smith");
++      const byFullName = await get("/internal/pcp-referrals?fullName=Jane%20Doe");
++      const byProvider = await get(
++        "/internal/pcp-referrals?referringProviderId=a0b1c2d3-e4f5-5000-8000-000000000001",
++      );
++
++      for (const res of [byPractice, byReferrer, byFullName, byProvider]) {
++        expect(res.json().referrals.map((r: { id: string }) => r.id)).toEqual(["abc123"]);
++      }
++    });
++  });
++
++  describe("GET /internal/pcp-referrals/{referralId}", () => {
++    test("existing id returns 200 with lead type and both stage fields", async () => {
++      await post(FULL_BODY);
++
++      const res = await get("/internal/pcp-referrals/abc123");
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).toMatchObject({
++        therapyOrPsychLead: "THERAPY_ONLY",
++        therapyLeadStage: "LEAD",
++        psychLeadStage: "CONTACT",
++      });
++    });
++
++    test("unknown id returns 404 NotFoundError", async () => {
++      const res = await get("/internal/pcp-referrals/does-not-exist");
++
++      expect(res.statusCode).toBe(404);
++      expect(res.json()).toMatchObject({ errorType: "NotFoundError" });
++    });
++
++    test("omitted optional fields are absent, not null", async () => {
++      await post({
++        id: "minimal",
++        leadId: "L1",
++        fullName: "Min Imal",
++        cleanReferrerName: "Dr. Ref",
++        referringProviderId: "prov-1",
++        practiceName: "Some Practice",
++        createdDate: "2026-07-01T00:00:00Z",
++        therapyOrPsychLead: "BOTH",
++      });
++
++      const body = (await get("/internal/pcp-referrals/minimal")).json();
++
++      expect(body).not.toHaveProperty("mobile");
++      expect(body).not.toHaveProperty("email");
++      expect(body).not.toHaveProperty("therapyLeadStage");
++    });
++  });
++
++  describe("GET /internal/pcp-referrals", () => {
++    test("no filter returns 422 — unfiltered listing over PHI is not offered", async () => {
++      await post(FULL_BODY);
++
++      const res = await get("/internal/pcp-referrals");
++
++      expect(res.statusCode).toBe(422);
++      expect(res.json().errorType).toBe("UnprocessableContentError");
++    });
++
++    test("practiceName, cleanReferrerName, and fullName match case-insensitively", async () => {
++      await post(FULL_BODY);
++
++      const byPractice = await get(
++        "/internal/pcp-referrals?practiceName=smith%20family%20practice",
++      );
++      const byReferrer = await get("/internal/pcp-referrals?cleanReferrerName=dr.%20smith");
++      const byFullName = await get("/internal/pcp-referrals?fullName=jane%20doe");
++
++      for (const res of [byPractice, byReferrer, byFullName]) {
++        expect(res.json().referrals.map((r: { id: string }) => r.id)).toEqual(["abc123"]);
++      }
++    });
++
++    test("referringProviderId is case-sensitive because GSI4 is not upper-cased", async () => {
++      await post({ ...FULL_BODY, referringProviderId: "Provider-Mixed-Case" });
++
++      const exact = await get("/internal/pcp-referrals?referringProviderId=Provider-Mixed-Case");
++      const wrongCase = await get(
++        "/internal/pcp-referrals?referringProviderId=provider-mixed-case",
++      );
++
++      expect(exact.json().referrals).toHaveLength(1);
++      expect(wrongCase.json().referrals).toEqual([]);
++    });
++
++    test("limit outside 1-100 returns 422", async () => {
++      const url = "/internal/pcp-referrals?fullName=Jane%20Doe";
++      expect((await get(`${url}&limit=0`)).statusCode).toBe(422);
++      expect((await get(`${url}&limit=101`)).statusCode).toBe(422);
++    });
++
++    test("cursor replay pages without repeats or gaps", async () => {
++      for (const id of ["r1", "r2", "r3"]) {
++        await post({ ...FULL_BODY, id, leadId: `L-${id}` });
++      }
++
++      const first = await get(
++        "/internal/pcp-referrals?practiceName=Smith%20Family%20Practice&limit=2",
++      );
++      expect(first.json().referrals).toHaveLength(2);
++      const cursor = encodeURIComponent(first.json().nextCursor);
++
++      const second = await get(
++        `/internal/pcp-referrals?practiceName=Smith%20Family%20Practice&limit=2&cursor=${cursor}`,
++      );
++
++      const firstIds = first.json().referrals.map((r: { id: string }) => r.id);
++      const secondIds = second.json().referrals.map((r: { id: string }) => r.id);
++
++      expect(secondIds).not.toEqual(expect.arrayContaining(firstIds));
++      expect([...firstIds, ...secondIds].sort()).toEqual(["r1", "r2", "r3"]);
++    });
++  });
++
++  describe("PATCH /internal/pcp-referrals/{referralId}", () => {
++    test("patching one stage field leaves every other field byte-identical", async () => {
++      const created = (await post(FULL_BODY)).json();
++
++      const res = await patch("abc123", { therapyLeadStage: "SCHEDULED" });
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).toEqual({
++        ...created,
++        therapyLeadStage: "SCHEDULED",
++        updatedAt: res.json().updatedAt,
++      });
++    });
++
++    test("unknown id returns 404 and does not create the record", async () => {
++      const res = await patch("does-not-exist", { fullName: "Ghost" });
++
++      expect(res.statusCode).toBe(404);
++      expect(await referralRepository.getReferral("does-not-exist")).toBeNull();
++    });
++
++    test("body containing id returns 422 — id is immutable", async () => {
++      await post(FULL_BODY);
++
++      const res = await patch("abc123", { id: "other-id", fullName: "Renamed" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("null clears only the targeted field, leaving the other optionals intact", async () => {
++      const created = (await post(FULL_BODY)).json();
++
++      const res = await patch("abc123", { mobile: null });
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).not.toHaveProperty("mobile");
++      expect(res.json()).toEqual({
++        ...created,
++        mobile: undefined,
++        updatedAt: res.json().updatedAt,
++      });
++    });
++
++    test("clearing a nullable stage field removes it", async () => {
++      await post(FULL_BODY);
++
++      const res = await patch("abc123", { psychLeadStage: null });
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).not.toHaveProperty("psychLeadStage");
++      expect(res.json().therapyLeadStage).toBe("LEAD");
++    });
++
++    test("changing practiceName moves the GSI1 partition", async () => {
++      await post(FULL_BODY);
++
++      await patch("abc123", { practiceName: "Jones Family Practice" });
++
++      const old = await get("/internal/pcp-referrals?practiceName=Smith%20Family%20Practice");
++      const fresh = await get("/internal/pcp-referrals?practiceName=Jones%20Family%20Practice");
++
++      expect(old.json().referrals).toEqual([]);
++      expect(fresh.json().referrals.map((r: { id: string }) => r.id)).toEqual(["abc123"]);
++    });
++
++    test("empty body returns 422 rather than issuing a no-op write", async () => {
++      await post(FULL_BODY);
++
++      const res = await patch("abc123", {});
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("advances updatedAt and leaves createdAt unchanged", async () => {
++      const created = (await post(FULL_BODY)).json();
++      await new Promise((resolve) => setTimeout(resolve, 25));
++
++      const patched = (await patch("abc123", { fullName: "Jane Roe" })).json();
++
++      expect(patched.createdAt).toBe(created.createdAt);
++      expect(new Date(patched.updatedAt).getTime()).toBeGreaterThan(
++        new Date(created.updatedAt).getTime(),
++      );
++    });
++  });
++
++  describe("DELETE /internal/pcp-referrals/{referralId}", () => {
++    test("existing id returns 204 and removes the record", async () => {
++      await post(FULL_BODY);
++
++      const res = await del("/internal/pcp-referrals/abc123");
++
++      expect(res.statusCode).toBe(204);
++      expect((await get("/internal/pcp-referrals/abc123")).statusCode).toBe(404);
++    });
++
++    test("unknown id returns 404", async () => {
++      expect((await del("/internal/pcp-referrals/does-not-exist")).statusCode).toBe(404);
++    });
++
++    test("deleting one referral leaves the others intact", async () => {
++      await post(FULL_BODY);
++      await post({ ...FULL_BODY, id: "other", leadId: "L-other" });
++
++      await del("/internal/pcp-referrals/abc123");
++
++      expect((await get("/internal/pcp-referrals/other")).statusCode).toBe(200);
++    });
++
++    test("delete-all keeps its existing 204 behavior", async () => {
++      await post(FULL_BODY);
++
++      const res = await del("/internal/pcp-referrals");
++
++      expect(res.statusCode).toBe(204);
++      expect((await get("/internal/pcp-referrals/abc123")).statusCode).toBe(404);
++    });
++  });
++});
+diff --git a/apps/api/src/__tests__/routes/internal-spec-contract.test.ts b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+index 90c316dc..9058c9a6 100644
+--- a/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
++++ b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+@@ -63,15 +63,21 @@ describe("internal spec contract", () => {
+       .sort();
+ 
+     expect(operationIds).toEqual([
++      "createPcpReferral",
+       "createPractice",
+       "deleteAllPcpReferrals",
+       "deleteAllPractices",
++      "deletePcpReferral",
+       "deletePractice",
++      "getInternalPcpReferral",
+       "getInternalPractice",
++      "listInternalPcpReferrals",
+       "listInternalPractices",
+       "optionsInternalPcpReferrals",
++      "optionsInternalPcpReferralsReferralId",
+       "optionsInternalPractices",
+       "optionsInternalPracticesPracticeId",
++      "updatePcpReferral",
+       "updatePractice",
+     ]);
+   });
+diff --git a/apps/api/src/generated/internal-route-handler-types.ts b/apps/api/src/generated/internal-route-handler-types.ts
+index 0a299233..52566453 100644
+--- a/apps/api/src/generated/internal-route-handler-types.ts
++++ b/apps/api/src/generated/internal-route-handler-types.ts
+@@ -34,8 +34,14 @@ export type RouteHandler<T extends keyof operations> = RouteHandlerMethod<
+   }
+ >;
+ 
++export type ListInternalPcpReferralsRouteHandler = RouteHandler<'listInternalPcpReferrals'>
++export type CreatePcpReferralRouteHandler = RouteHandler<'createPcpReferral'>
+ export type DeleteAllPcpReferralsRouteHandler = RouteHandler<'deleteAllPcpReferrals'>
+ export type OptionsInternalPcpReferralsRouteHandler = RouteHandler<'optionsInternalPcpReferrals'>
++export type GetInternalPcpReferralRouteHandler = RouteHandler<'getInternalPcpReferral'>
++export type DeletePcpReferralRouteHandler = RouteHandler<'deletePcpReferral'>
++export type OptionsInternalPcpReferralsReferralIdRouteHandler = RouteHandler<'optionsInternalPcpReferralsReferralId'>
++export type UpdatePcpReferralRouteHandler = RouteHandler<'updatePcpReferral'>
+ export type ListInternalPracticesRouteHandler = RouteHandler<'listInternalPractices'>
+ export type CreatePracticeRouteHandler = RouteHandler<'createPractice'>
+ export type DeleteAllPracticesRouteHandler = RouteHandler<'deleteAllPractices'>
+diff --git a/apps/api/src/generated/internal-types.ts b/apps/api/src/generated/internal-types.ts
+index c0d87de3..543283f5 100644
+--- a/apps/api/src/generated/internal-types.ts
++++ b/apps/api/src/generated/internal-types.ts
+@@ -11,9 +11,17 @@ export interface paths {
+             path?: never;
+             cookie?: never;
+         };
+-        get?: never;
++        /**
++         * List PCP referral records
++         * @description Returns a page of stored referral records. Exactly one filter is required — referrals carry PHI, and the four indexed lookups cover every operator use case, so unfiltered listing is not offered. practiceName, cleanReferrerName, and fullName match case-insensitively; referringProviderId is case-sensitive because GSI4 is not upper-cased.
++         */
++        get: operations["listInternalPcpReferrals"];
+         put?: never;
+-        post?: never;
++        /**
++         * Create a PCP referral record
++         * @description Creates a referral with a caller-supplied id. Validation matches the Hex ingest row so a hand-created fixture cannot be something the monthly batch is unable to process. Rejects with 409 if the id already exists.
++         */
++        post: operations["createPcpReferral"];
+         /**
+          * Delete all PCP referral records
+          * @description Wipes all referral records from the table. Intended for dev tooling — guarded by apiKeyAuth and not reachable via Kong (internal spec only).
+@@ -28,6 +36,41 @@ export interface paths {
+         patch?: never;
+         trace?: never;
+     };
++    "/internal/pcp-referrals/{referralId}": {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Stored referral id. */
++                referralId: string;
++            };
++            cookie?: never;
++        };
++        /**
++         * Get a PCP referral record
++         * @description Returns the full stored state of one referral, including lead type and both stage fields. Absent optional attributes are omitted rather than returned as null.
++         */
++        get: operations["getInternalPcpReferral"];
++        put?: never;
++        post?: never;
++        /**
++         * Delete a PCP referral record
++         * @description Deletes one referral, leaving every other record intact.
++         */
++        delete: operations["deletePcpReferral"];
++        /**
++         * CORS preflight
++         * @description Auto-generated preflight operation for Kong routing.
++         */
++        options: operations["optionsInternalPcpReferralsReferralId"];
++        head?: never;
++        /**
++         * Update a PCP referral record
++         * @description Applies only the supplied fields. Editing one stage field must not disturb mobile, email, networkName, insuranceCarrier, or any other stored attribute. Omitting a field leaves it untouched; null clears an optional field. Never creates a record.
++         */
++        patch: operations["updatePcpReferral"];
++        trace?: never;
++    };
+     "/internal/practices": {
+         parameters: {
+             query?: never;
+@@ -196,6 +239,101 @@ export interface components {
+             /** Format: date */
+             lastReferralDate?: string;
+         };
++        /**
++         * @description Whether the lead is associated with therapy, psychiatry, or both.
++         * @enum {string}
++         */
++        LeadType: "PSYCH_ONLY" | "THERAPY_ONLY" | "BOTH";
++        /**
++         * @description Lead-funnel stage.
++         * @enum {string}
++         */
++        LeadStage: "LEAD" | "CONTACT" | "HOLD" | "REGISTERED" | "SCHEDULED" | "PATIENT";
++        /** @description The full stored state of a referral. Carries PHI. Optional attributes are omitted when absent rather than returned as null. */
++        InternalPcpReferral: {
++            id: string;
++            /** @description Salesforce contact ID. */
++            leadId: string;
++            fullName: string;
++            mobile?: string;
++            email?: string;
++            cleanReferrerName: string;
++            referringProviderId: string;
++            networkName?: string;
++            insuranceCarrier?: string;
++            utmSource?: string;
++            practiceName: string;
++            practiceOwnerName?: string;
++            practiceAccountId?: string;
++            sourceRunId?: string;
++            producedAt?: string;
++            /** @description ISO 8601 timestamp when the lead was created in Salesforce. */
++            createdDate: string;
++            therapyOrPsychLead: components["schemas"]["LeadType"];
++            therapyLeadStage?: components["schemas"]["LeadStage"];
++            psychLeadStage?: components["schemas"]["LeadStage"];
++            therapyLeadSubstage?: string;
++            /** Format: date-time */
++            createdAt: string;
++            /** Format: date-time */
++            updatedAt: string;
++        };
++        InternalPcpReferralListResponse: {
++            referrals: components["schemas"]["InternalPcpReferral"][];
++            /** @description Present when more results remain; replay it to fetch the next page. */
++            nextCursor?: string;
++        };
++        /** @description Field constraints mirror the Hex ingest row so a hand-created fixture cannot be something the monthly batch is unable to process. createdAt and updatedAt are server-managed and rejected if supplied. */
++        CreateInternalPcpReferralRequest: {
++            id: string;
++            leadId: string;
++            fullName: string;
++            mobile?: string;
++            /** Format: email */
++            email?: string;
++            cleanReferrerName: string;
++            referringProviderId: string;
++            networkName?: string;
++            insuranceCarrier?: string;
++            utmSource?: string;
++            practiceName: string;
++            practiceOwnerName?: string;
++            practiceAccountId?: string;
++            sourceRunId?: string;
++            /** Format: date-time */
++            producedAt?: string;
++            /** Format: date-time */
++            createdDate: string;
++            therapyOrPsychLead: components["schemas"]["LeadType"];
++            therapyLeadStage?: components["schemas"]["LeadStage"];
++            psychLeadStage?: components["schemas"]["LeadStage"];
++            therapyLeadSubstage?: string;
++        };
++        /** @description Supply only the fields to change. Omitting a field leaves the stored value untouched; null clears an optional field. id is the primary key and cannot be changed, so it is rejected here. */
++        UpdateInternalPcpReferralRequest: {
++            leadId?: string;
++            fullName?: string;
++            mobile?: string | null;
++            /** Format: email */
++            email?: string | null;
++            cleanReferrerName?: string;
++            referringProviderId?: string;
++            networkName?: string | null;
++            insuranceCarrier?: string | null;
++            utmSource?: string | null;
++            practiceName?: string;
++            practiceOwnerName?: string | null;
++            practiceAccountId?: string | null;
++            sourceRunId?: string | null;
++            /** Format: date-time */
++            producedAt?: string | null;
++            /** Format: date-time */
++            createdDate?: string;
++            therapyOrPsychLead?: components["schemas"]["LeadType"];
++            therapyLeadStage?: components["schemas"]["LeadStage"] | null;
++            psychLeadStage?: components["schemas"]["LeadStage"] | null;
++            therapyLeadSubstage?: string | null;
++        };
+         /** @description Supply only the fields to change. Omitting a field leaves the stored value untouched; null clears an optional field. id is the primary key and cannot be changed, so it is rejected here. */
+         UpdateInternalPracticeRequest: {
+             name?: string;
+@@ -260,6 +398,70 @@ export interface components {
+ }
+ export type $defs = Record<string, never>;
+ export interface operations {
++    listInternalPcpReferrals: {
++        parameters: {
++            query?: {
++                /** @description Exact practice name to look up (case-insensitive). */
++                practiceName?: string;
++                /** @description Exact referring provider name to look up (case-insensitive). */
++                cleanReferrerName?: string;
++                /** @description Case-sensitive — GSI4 preserves the stored casing. */
++                referringProviderId?: string;
++                /** @description Exact patient full name to look up (case-insensitive). */
++                fullName?: string;
++                /** @description Maximum number of records to return. */
++                limit?: number;
++                /** @description Opaque pagination cursor returned by a previous call. */
++                cursor?: string;
++            };
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description A page of referral records. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPcpReferralListResponse"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    createPcpReferral: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": components["schemas"]["CreateInternalPcpReferralRequest"];
++            };
++        };
++        responses: {
++            /** @description Referral created. */
++            201: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPcpReferral"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            409: components["responses"]["ConflictErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
+     deleteAllPcpReferrals: {
+         parameters: {
+             query?: never;
+@@ -298,6 +500,109 @@ export interface operations {
+             };
+         };
+     };
++    getInternalPcpReferral: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Stored referral id. */
++                referralId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description The referral record. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPcpReferral"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    deletePcpReferral: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Stored referral id. */
++                referralId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description Referral deleted. */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    optionsInternalPcpReferralsReferralId: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Stored referral id. */
++                referralId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description No Content */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    updatePcpReferral: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Stored referral id. */
++                referralId: string;
++            };
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": components["schemas"]["UpdateInternalPcpReferralRequest"];
++            };
++        };
++        responses: {
++            /** @description The updated referral record. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPcpReferral"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
+     listInternalPractices: {
+         parameters: {
+             query?: {
+diff --git a/apps/api/src/routes/internal/pcp-referrals.ts b/apps/api/src/routes/internal/pcp-referrals.ts
+index 3795f909..517599bc 100644
+--- a/apps/api/src/routes/internal/pcp-referrals.ts
++++ b/apps/api/src/routes/internal/pcp-referrals.ts
+@@ -1,8 +1,22 @@
++import { ConflictError as DataConflictError } from "@attribution-service/data";
+ import { logger } from "../../components";
++import {
++  ConflictError,
++  ContentIssue,
++  NotFoundError,
++  UnprocessableContentError,
++} from "../../errors";
+ import type {
++  CreatePcpReferralRouteHandler,
+   DeleteAllPcpReferralsRouteHandler,
++  DeletePcpReferralRouteHandler,
++  GetInternalPcpReferralRouteHandler,
++  ListInternalPcpReferralsRouteHandler,
++  OptionsInternalPcpReferralsReferralIdRouteHandler,
+   OptionsInternalPcpReferralsRouteHandler,
++  UpdatePcpReferralRouteHandler,
+ } from "../../generated/internal-route-handler-types";
++import * as internalReferralService from "../../service/internal-pcp-referral-service";
+ import * as pcpReferralsService from "../../service/pcp-referrals-service";
+ 
+ export const deleteAllPcpReferrals: DeleteAllPcpReferralsRouteHandler = async (_request, reply) => {
+@@ -11,9 +25,85 @@ export const deleteAllPcpReferrals: DeleteAllPcpReferralsRouteHandler = async (_
+   reply.code(204).send();
+ };
+ 
++export const listInternalPcpReferrals: ListInternalPcpReferralsRouteHandler = async (request) => {
++  const { practiceName, cleanReferrerName, referringProviderId, fullName, limit, cursor } =
++    request.query ?? {};
++  const pagination = {
++    ...(limit !== undefined && { limit }),
++    ...(cursor !== undefined && { cursor }),
++  };
++
++  // Referrals carry PHI, so there is no unfiltered listing to fall back to.
++  if (practiceName !== undefined) {
++    return internalReferralService.listReferrals({ practiceName, ...pagination });
++  }
++  if (cleanReferrerName !== undefined) {
++    return internalReferralService.listReferrals({ cleanReferrerName, ...pagination });
++  }
++  if (referringProviderId !== undefined) {
++    return internalReferralService.listReferrals({ referringProviderId, ...pagination });
++  }
++  if (fullName !== undefined) {
++    return internalReferralService.listReferrals({ fullName, ...pagination });
++  }
++
++  throw new UnprocessableContentError("A referral filter is required", [
++    new ContentIssue(
++      "/query",
++      "required",
++      "Supply exactly one of practiceName, cleanReferrerName, referringProviderId, or fullName",
++    ),
++  ]);
++};
++
++export const createPcpReferral: CreatePcpReferralRouteHandler = async (request, reply) => {
++  try {
++    const created = await internalReferralService.createReferral(request.body);
++    reply.code(201);
++    return created;
++  } catch (error) {
++    if (error instanceof DataConflictError) {
++      throw new ConflictError(error.message);
++    }
++    throw error;
++  }
++};
++
++export const getInternalPcpReferral: GetInternalPcpReferralRouteHandler = async (request) => {
++  const referral = await internalReferralService.getReferral(request.params.referralId);
++  if (!referral) {
++    throw new NotFoundError(`Referral ${request.params.referralId} not found`);
++  }
++  return referral;
++};
++
++export const updatePcpReferral: UpdatePcpReferralRouteHandler = async (request) => {
++  const updated = await internalReferralService.updateReferral(
++    request.params.referralId,
++    request.body,
++  );
++  if (!updated) {
++    throw new NotFoundError(`Referral ${request.params.referralId} not found`);
++  }
++  return updated;
++};
++
++export const deletePcpReferral: DeletePcpReferralRouteHandler = async (request, reply) => {
++  const deleted = await internalReferralService.deleteReferral(request.params.referralId);
++  if (!deleted) {
++    throw new NotFoundError(`Referral ${request.params.referralId} not found`);
++  }
++  reply.code(204).send();
++};
++
+ export const optionsInternalPcpReferrals: OptionsInternalPcpReferralsRouteHandler = async (
+   _request,
+   reply,
+ ) => {
+   reply.code(204).send();
+ };
++
++export const optionsInternalPcpReferralsReferralId: OptionsInternalPcpReferralsReferralIdRouteHandler =
++  async (_request, reply) => {
++    reply.code(204).send();
++  };
+diff --git a/apps/api/src/service/internal-pcp-referral-service.ts b/apps/api/src/service/internal-pcp-referral-service.ts
+new file mode 100644
+index 00000000..f3de897e
+--- /dev/null
++++ b/apps/api/src/service/internal-pcp-referral-service.ts
+@@ -0,0 +1,117 @@
++import type { Referral } from "@attribution-service/data";
++import { referralRepository } from "@attribution-service/data";
++import type { components } from "../generated/internal-types";
++
++type InternalPcpReferral = components["schemas"]["InternalPcpReferral"];
++type CreateRequest = components["schemas"]["CreateInternalPcpReferralRequest"];
++type UpdateRequest = components["schemas"]["UpdateInternalPcpReferralRequest"];
++
++type Pagination = { limit?: number; cursor?: string };
++
++/**
++ * Exactly one filter selects the index the list is served from. Modelled as a
++ * union so a filterless call is a type error rather than a runtime surprise —
++ * unfiltered referral listing is not offered (these records carry PHI).
++ */
++export type ReferralListFilters = Pagination &
++  (
++    | { practiceName: string }
++    | { cleanReferrerName: string }
++    | { referringProviderId: string }
++    | { fullName: string }
++  );
++
++const OPTIONAL_FIELDS = [
++  "mobile",
++  "email",
++  "networkName",
++  "insuranceCarrier",
++  "utmSource",
++  "practiceOwnerName",
++  "practiceAccountId",
++  "sourceRunId",
++  "producedAt",
++  "therapyLeadStage",
++  "psychLeadStage",
++  "therapyLeadSubstage",
++] as const;
++
++/**
++ * Absent optional attributes are omitted rather than serialized as null, so a
++ * response mirrors what is actually stored.
++ */
++export function toInternalPcpReferral(referral: Referral): InternalPcpReferral {
++  const result: InternalPcpReferral = {
++    id: referral.id,
++    leadId: referral.leadId,
++    fullName: referral.fullName,
++    cleanReferrerName: referral.cleanReferrerName,
++    referringProviderId: referral.referringProviderId,
++    practiceName: referral.practiceName,
++    createdDate: referral.createdDate,
++    therapyOrPsychLead: referral.therapyOrPsychLead,
++    createdAt: referral.createdAt.toISOString(),
++    updatedAt: referral.updatedAt.toISOString(),
++  };
++
++  for (const field of OPTIONAL_FIELDS) {
++    const value = referral[field];
++    if (value !== undefined) {
++      Object.assign(result, { [field]: value });
++    }
++  }
++
++  return result;
++}
++
++export async function createReferral(request: CreateRequest): Promise<InternalPcpReferral> {
++  const created = await referralRepository.createReferral(request);
++  return toInternalPcpReferral(created);
++}
++
++export async function getReferral(id: string): Promise<InternalPcpReferral | null> {
++  const referral = await referralRepository.getReferral(id);
++  return referral ? toInternalPcpReferral(referral) : null;
++}
++
++export async function updateReferral(
++  id: string,
++  request: UpdateRequest,
++): Promise<InternalPcpReferral | null> {
++  const patched = await referralRepository.patchReferral(id, request);
++  return patched ? toInternalPcpReferral(patched) : null;
++}
++
++export async function deleteReferral(id: string): Promise<boolean> {
++  return referralRepository.deleteReferral(id);
++}
++
++export async function listReferrals(
++  filters: ReferralListFilters,
++): Promise<{ referrals: InternalPcpReferral[]; nextCursor?: string }> {
++  const page = await fetchPage(filters);
++
++  return {
++    referrals: page.referrals.map(toInternalPcpReferral),
++    ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
++  };
++}
++
++/**
++ * At most one filter is honoured, in declaration order, so every lookup is
++ * served by its own GSI rather than a scan-and-filter.
++ */
++function fetchPage(filters: ReferralListFilters) {
++  const { limit, cursor } = filters;
++
++  if ("practiceName" in filters) {
++    return referralRepository.listReferralsByPractice(filters.practiceName, limit, cursor);
++  }
++  if ("cleanReferrerName" in filters) {
++    return referralRepository.listReferralsByReferrer(filters.cleanReferrerName, limit, cursor);
++  }
++  if ("referringProviderId" in filters) {
++    return referralRepository.listReferralsByProviderId(filters.referringProviderId, limit, cursor);
++  }
++  return referralRepository.listReferralsByFullName(filters.fullName, limit, cursor);
++}
+diff --git a/docs/openapi-internal.yaml b/docs/openapi-internal.yaml
+index ebc06910..50275c4a 100644
+--- a/docs/openapi-internal.yaml
++++ b/docs/openapi-internal.yaml
+@@ -34,6 +34,115 @@ tags:
+ 
+ paths:
+   /internal/pcp-referrals:
++    get:
++      operationId: listInternalPcpReferrals
++      summary: List PCP referral records
++      description: >
++        Returns a page of stored referral records. Exactly one filter is
++        required — referrals carry PHI, and the four indexed lookups cover every
++        operator use case, so unfiltered listing is not offered. practiceName,
++        cleanReferrerName, and fullName match case-insensitively;
++        referringProviderId is case-sensitive because GSI4 is not upper-cased.
++      security:
++        - apiKeyAuth: []
++      parameters:
++        - name: practiceName
++          in: query
++          required: false
++          description: Exact practice name to look up (case-insensitive).
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 255
++        - name: cleanReferrerName
++          in: query
++          required: false
++          description: Exact referring provider name to look up (case-insensitive).
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 255
++        - name: referringProviderId
++          in: query
++          required: false
++          description: Case-sensitive — GSI4 preserves the stored casing.
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 100
++        - name: fullName
++          in: query
++          required: false
++          description: Exact patient full name to look up (case-insensitive).
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 255
++        - name: limit
++          in: query
++          required: false
++          description: Maximum number of records to return.
++          schema:
++            type: integer
++            format: int32
++            minimum: 1
++            maximum: 100
++            default: 25
++        - name: cursor
++          in: query
++          required: false
++          description: Opaque pagination cursor returned by a previous call.
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 4096
++      responses:
++        "200":
++          description: A page of referral records.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPcpReferralListResponse"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - pcp-referrals
++    post:
++      operationId: createPcpReferral
++      summary: Create a PCP referral record
++      description: >
++        Creates a referral with a caller-supplied id. Validation matches the Hex
++        ingest row so a hand-created fixture cannot be something the monthly
++        batch is unable to process. Rejects with 409 if the id already exists.
++      security:
++        - apiKeyAuth: []
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: "#/components/schemas/CreateInternalPcpReferralRequest"
++      responses:
++        "201":
++          description: Referral created.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPcpReferral"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "409":
++          $ref: "#/components/responses/ConflictErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - pcp-referrals
+     delete:
+       operationId: deleteAllPcpReferrals
+       summary: Delete all PCP referral records
+@@ -60,6 +169,103 @@ paths:
+         "204":
+           description: No Content
+ 
++  /internal/pcp-referrals/{referralId}:
++    parameters:
++      - name: referralId
++        in: path
++        required: true
++        description: Stored referral id.
++        schema:
++          type: string
++          minLength: 1
++          maxLength: 100
++    get:
++      operationId: getInternalPcpReferral
++      summary: Get a PCP referral record
++      description: >
++        Returns the full stored state of one referral, including lead type and
++        both stage fields. Absent optional attributes are omitted rather than
++        returned as null.
++      security:
++        - apiKeyAuth: []
++      responses:
++        "200":
++          description: The referral record.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPcpReferral"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - pcp-referrals
++    patch:
++      operationId: updatePcpReferral
++      summary: Update a PCP referral record
++      description: >
++        Applies only the supplied fields. Editing one stage field must not
++        disturb mobile, email, networkName, insuranceCarrier, or any other
++        stored attribute. Omitting a field leaves it untouched; null clears an
++        optional field. Never creates a record.
++      security:
++        - apiKeyAuth: []
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: "#/components/schemas/UpdateInternalPcpReferralRequest"
++      responses:
++        "200":
++          description: The updated referral record.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPcpReferral"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - pcp-referrals
++    delete:
++      operationId: deletePcpReferral
++      summary: Delete a PCP referral record
++      description: Deletes one referral, leaving every other record intact.
++      security:
++        - apiKeyAuth: []
++      responses:
++        "204":
++          description: Referral deleted.
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - pcp-referrals
++    options:
++      summary: CORS preflight
++      description: Auto-generated preflight operation for Kong routing.
++      operationId: optionsInternalPcpReferralsReferralId
++      security: []
++      responses:
++        "204":
++          description: No Content
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - pcp-referrals
++
+   /internal/practices:
+     get:
+       operationId: listInternalPractices
+@@ -556,6 +762,322 @@ components:
+         - name
+         - status
+ 
++    LeadType:
++      type: string
++      description: Whether the lead is associated with therapy, psychiatry, or both.
++      enum:
++        - PSYCH_ONLY
++        - THERAPY_ONLY
++        - BOTH
++
++    LeadStage:
++      type: string
++      description: Lead-funnel stage.
++      enum:
++        - LEAD
++        - CONTACT
++        - HOLD
++        - REGISTERED
++        - SCHEDULED
++        - PATIENT
++
++    InternalPcpReferral:
++      type: object
++      description: >
++        The full stored state of a referral. Carries PHI. Optional attributes
++        are omitted when absent rather than returned as null.
++      properties:
++        id:
++          type: string
++          minLength: 1
++          maxLength: 100
++        leadId:
++          type: string
++          minLength: 1
++          maxLength: 100
++          description: Salesforce contact ID.
++        fullName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        mobile:
++          type: string
++          maxLength: 50
++        email:
++          type: string
++          maxLength: 255
++        cleanReferrerName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        referringProviderId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        networkName:
++          type: string
++          maxLength: 255
++        insuranceCarrier:
++          type: string
++          maxLength: 255
++        utmSource:
++          type: string
++          maxLength: 255
++        practiceName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        practiceOwnerName:
++          type: string
++          maxLength: 255
++        practiceAccountId:
++          type: string
++          maxLength: 100
++        sourceRunId:
++          type: string
++          maxLength: 100
++        producedAt:
++          type: string
++          maxLength: 40
++        createdDate:
++          type: string
++          maxLength: 40
++          description: ISO 8601 timestamp when the lead was created in Salesforce.
++        therapyOrPsychLead:
++          $ref: "#/components/schemas/LeadType"
++        therapyLeadStage:
++          $ref: "#/components/schemas/LeadStage"
++        psychLeadStage:
++          $ref: "#/components/schemas/LeadStage"
++        therapyLeadSubstage:
++          type: string
++          maxLength: 255
++        createdAt:
++          type: string
++          format: date-time
++          maxLength: 40
++        updatedAt:
++          type: string
++          format: date-time
++          maxLength: 40
++      required:
++        - id
++        - leadId
++        - fullName
++        - cleanReferrerName
++        - referringProviderId
++        - practiceName
++        - createdDate
++        - therapyOrPsychLead
++        - createdAt
++        - updatedAt
++
++    InternalPcpReferralListResponse:
++      type: object
++      properties:
++        referrals:
++          type: array
++          maxItems: 100
++          items:
++            $ref: "#/components/schemas/InternalPcpReferral"
++        nextCursor:
++          type: string
++          maxLength: 4096
++          description: Present when more results remain; replay it to fetch the next page.
++      required:
++        - referrals
++
++    CreateInternalPcpReferralRequest:
++      type: object
++      additionalProperties: false
++      description: >
++        Field constraints mirror the Hex ingest row so a hand-created fixture
++        cannot be something the monthly batch is unable to process. createdAt
++        and updatedAt are server-managed and rejected if supplied.
++      properties:
++        id:
++          type: string
++          minLength: 1
++          maxLength: 100
++        leadId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        fullName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        mobile:
++          type: string
++          minLength: 1
++          maxLength: 50
++        email:
++          type: string
++          format: email
++          minLength: 1
++          maxLength: 255
++        cleanReferrerName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        referringProviderId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        networkName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        insuranceCarrier:
++          type: string
++          minLength: 1
++          maxLength: 255
++        utmSource:
++          type: string
++          minLength: 1
++          maxLength: 255
++        practiceName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        practiceOwnerName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        practiceAccountId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        sourceRunId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        producedAt:
++          type: string
++          format: date-time
++          maxLength: 40
++        createdDate:
++          type: string
++          format: date-time
++          maxLength: 40
++        therapyOrPsychLead:
++          $ref: "#/components/schemas/LeadType"
++        therapyLeadStage:
++          $ref: "#/components/schemas/LeadStage"
++        psychLeadStage:
++          $ref: "#/components/schemas/LeadStage"
++        therapyLeadSubstage:
++          type: string
++          minLength: 1
++          maxLength: 255
++      required:
++        - id
++        - leadId
++        - fullName
++        - cleanReferrerName
++        - referringProviderId
++        - practiceName
++        - createdDate
++        - therapyOrPsychLead
++
++    UpdateInternalPcpReferralRequest:
++      type: object
++      additionalProperties: false
++      minProperties: 1
++      description: >
++        Supply only the fields to change. Omitting a field leaves the stored
++        value untouched; null clears an optional field. id is the primary key
++        and cannot be changed, so it is rejected here.
++      properties:
++        leadId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        fullName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        mobile:
++          type: string
++          minLength: 1
++          maxLength: 50
++          nullable: true
++        email:
++          type: string
++          format: email
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        cleanReferrerName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        referringProviderId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        networkName:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        insuranceCarrier:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        utmSource:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        practiceName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        practiceOwnerName:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        practiceAccountId:
++          type: string
++          minLength: 1
++          maxLength: 100
++          nullable: true
++        sourceRunId:
++          type: string
++          minLength: 1
++          maxLength: 100
++          nullable: true
++        producedAt:
++          type: string
++          format: date-time
++          maxLength: 40
++          nullable: true
++        createdDate:
++          type: string
++          format: date-time
++          maxLength: 40
++        therapyOrPsychLead:
++          $ref: "#/components/schemas/LeadType"
++        # anyOf rather than `nullable: true`: AJV rejects `nullable` without a
++        # sibling `type`, and adding one alongside `enum` would not admit null
++        # anyway unless null were an enum member.
++        therapyLeadStage:
++          anyOf:
++            - $ref: "#/components/schemas/LeadStage"
++            - type: "null"
++        psychLeadStage:
++          anyOf:
++            - $ref: "#/components/schemas/LeadStage"
++            - type: "null"
++        therapyLeadSubstage:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++
+     UpdateInternalPracticeRequest:
+       type: object
+       additionalProperties: false

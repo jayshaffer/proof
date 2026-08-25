@@ -7,3 +7,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 node "$HERE/generate.js" "$HERE/prototype/data/sample-fix.json" "$HERE/prototype/index.html"
 node "$HERE/generate.js" "$HERE/prototype/data/pr-1227.json" "$HERE/prototype/pr-1227.html"
+
+# Stack sample (proof.stack/v1) — composed offline from committed reduced spines
+# (no gh). A dev-only synthetic 2-layer stack; see stack-sample.manifest.json.
+node "$HERE/generator/compose-stack.js" "$HERE/prototype/data/stack-sample.manifest.json" "$HERE/prototype/data/stack-sample.json"
+node "$HERE/generate.js" "$HERE/prototype/data/stack-sample.json" "$HERE/prototype/stack-sample.html"
