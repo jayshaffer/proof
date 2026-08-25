@@ -81,6 +81,11 @@ if [ "${1:-}" = "stack" ]; then
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   mkdir -p "$OUT/data"
+  # Absolutize OUT: per-layer spine paths get written into the runtime manifest,
+  # and compose-stack.js resolves manifest paths relative to the manifest's own
+  # dir ($TMP) — a relative --out would resolve against $TMP and miss. Do this
+  # after mkdir so the dir exists for `cd`.
+  OUT="$(cd "$OUT" && pwd)"
 
   N="$(jq '.layers | length' "$MANIFEST")"
   TOP="$(jq -r '.topPr // (.layers[-1].pr)' "$MANIFEST")"
