@@ -38,13 +38,22 @@ function parseAcMap(md) {
   return map;
 }
 
-// Non-context evidence files a decision anchors, as file -> Set(decisionId).
-function anchoredFiles(spine) {
+// Evidence-anchor files a decision cites, as file -> Set(decisionId). By
+// default only non-context anchors count — that's "this layer's own diff
+// touches this file," the right test for whether a layer *introduced* a
+// file. Pass includeContext for the consuming side of a builds-on edge: a
+// later layer's citation of an earlier layer's file is, correctly, marked
+// context (it isn't in the later layer's own diff), but it still means that
+// decision depends on the file — excluding it made cross-layer dependencies
+// (the common case) undetectable, leaving only same-file-in-both-diffs
+// collisions, which `seams` below already covers on its own.
+function anchoredFiles(spine, { includeContext = false } = {}) {
   const byFile = new Map();
   for (const d of spine.decisions || []) {
     for (const ev of d.evidence || []) {
       const c = ev.code;
-      if (!c || c.context || !c.file) continue;
+      if (!c || !c.file) continue;
+      if (c.context && !includeContext) continue;
       if (!byFile.has(c.file)) byFile.set(c.file, new Set());
       byFile.get(c.file).add(d.id);
     }
@@ -76,7 +85,14 @@ function compose(manifest, baseDir) {
     };
   });
 
+  // Strict (non-context) per layer — "this layer introduced/touched this
+  // file." Used for the earlier side of a builds-on edge below, and for the
+  // module's exported anchoredFiles behavior (default signature unchanged).
   const anchorsByLayer = layers.map((L) => anchoredFiles(L.spine));
+  // All anchors including context — "this layer's decisions cite this file,"
+  // whether in its own diff or as a dependency on another layer. Used for the
+  // later/consuming side of a builds-on edge.
+  const anchorsByLayerAll = layers.map((L) => anchoredFiles(L.spine, { includeContext: true }));
 
   // seams: a path touched (via any diff file) by more than one layer
   const layersByFile = {};
@@ -88,12 +104,13 @@ function compose(manifest, baseDir) {
     if (layersByFile[f].size > 1) seams[f] = [...layersByFile[f]].sort((a, b) => a - b);
   }
 
-  // builds-on edges: a later layer's decision anchors a file an earlier layer's
-  // decision also anchors. Decision-anchored only — this is the reasoning seam.
+  // builds-on edges: a later layer's decision cites (in-diff or as a
+  // dependency) a file an earlier layer's decision introduced. Decision-
+  // anchored only — this is the reasoning seam, not an import graph.
   const edges = [];
   const seen = new Set();
   for (let j = 1; j < layers.length; j++) {
-    for (const [file, laterIds] of anchorsByLayer[j]) {
+    for (const [file, laterIds] of anchorsByLayerAll[j]) {
       for (let i = 0; i < j; i++) {
         const earlier = anchorsByLayer[i].get(file);
         if (!earlier) continue;
