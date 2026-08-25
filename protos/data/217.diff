@@ -1,0 +1,1306 @@
+diff --git a/packages/data/src/__tests__/repository/practice-repository.test.ts b/packages/data/src/__tests__/repository/practice-repository.test.ts
+index b2421e3d..c4ee7f9c 100644
+--- a/packages/data/src/__tests__/repository/practice-repository.test.ts
++++ b/packages/data/src/__tests__/repository/practice-repository.test.ts
+@@ -1,15 +1,27 @@
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+-import type { PracticeStatus } from "../../model";
++import { ConflictError } from "../../errors";
++import { PracticeStatus } from "../../model";
+ import { PracticeRepository } from "../../repository/practice-repository";
+ import { clearAllItems } from "../../test-utils";
+ 
++const PRACTICE_ID = "ACCT-001";
++const PRACTICE_NAME = "Smith Family Practice";
++const ACCOUNT_MANAGER = "Jordan Lee";
++
+ const BASE_PRACTICE = {
+-  id: "ACCT-001",
+-  name: "Smith Family Practice",
+-  status: "SOLD" as const,
+-  accountManager: "Jordan Lee",
++  id: PRACTICE_ID,
++  name: PRACTICE_NAME,
++  status: PracticeStatus.SOLD,
++  accountManager: ACCOUNT_MANAGER,
+ };
+ 
++const MISSING_PRACTICE_ID = "does-not-exist";
++const PRACTICE_EMAIL = "front-desk@smith.example";
++const REPORTS_PRACTICE_EMAIL = "reports@smithfamily.example";
++const LAST_REFERRAL_DATE = "2026-05-15";
++const RENAMED_PRACTICE_NAME = "Smith Family Health";
++const OTHER_ACCOUNT_MANAGER = "Casey Kim";
++
+ function practice(id: string, name: string, status: PracticeStatus, accountManager: string) {
+   return { id, name, status, accountManager };
+ }
+@@ -29,10 +41,10 @@ describe("PracticeRepository", () => {
+     it("creates a practice when it does not exist", async () => {
+       const result = await repo.upsertPractice(BASE_PRACTICE);
+ 
+-      expect(result.id).toBe("ACCT-001");
+-      expect(result.name).toBe("Smith Family Practice");
+-      expect(result.status).toBe("SOLD");
+-      expect(result.accountManager).toBe("Jordan Lee");
++      expect(result.id).toBe(PRACTICE_ID);
++      expect(result.name).toBe(PRACTICE_NAME);
++      expect(result.status).toBe(PracticeStatus.SOLD);
++      expect(result.accountManager).toBe(ACCOUNT_MANAGER);
+       expect(result.createdAt).toBeInstanceOf(Date);
+       expect(result.updatedAt).toBeInstanceOf(Date);
+     });
+@@ -47,28 +59,31 @@ describe("PracticeRepository", () => {
+ 
+       expect(updated.name).toBe("Smith Family Practice Updated");
+ 
+-      const fetched = await repo.getPractice("ACCT-001");
++      const fetched = await repo.getPractice(PRACTICE_ID);
+       expect(fetched?.name).toBe("Smith Family Practice Updated");
+     });
+ 
+     it("can upsert with CHURNED status", async () => {
+-      const result = await repo.upsertPractice({ ...BASE_PRACTICE, status: "CHURNED" });
+-      expect(result.status).toBe("CHURNED");
++      const result = await repo.upsertPractice({
++        ...BASE_PRACTICE,
++        status: PracticeStatus.CHURNED,
++      });
++      expect(result.status).toBe(PracticeStatus.CHURNED);
+     });
+ 
+     it("status change moves practice between GSI partitions", async () => {
+       await repo.upsertPractice(BASE_PRACTICE);
+ 
+-      const before = await repo.listPracticesByStatus("SOLD");
+-      expect(before.practices.map((p) => p.id)).toContain("ACCT-001");
++      const before = await repo.listPracticesByStatus(PracticeStatus.SOLD);
++      expect(before.practices.map((p) => p.id)).toContain(PRACTICE_ID);
+ 
+-      await repo.upsertPractice({ ...BASE_PRACTICE, status: "CHURNED" });
++      await repo.upsertPractice({ ...BASE_PRACTICE, status: PracticeStatus.CHURNED });
+ 
+-      const soldAfter = await repo.listPracticesByStatus("SOLD");
+-      expect(soldAfter.practices.map((p) => p.id)).not.toContain("ACCT-001");
++      const soldAfter = await repo.listPracticesByStatus(PracticeStatus.SOLD);
++      expect(soldAfter.practices.map((p) => p.id)).not.toContain(PRACTICE_ID);
+ 
+-      const churnedAfter = await repo.listPracticesByStatus("CHURNED");
+-      expect(churnedAfter.practices.map((p) => p.id)).toContain("ACCT-001");
++      const churnedAfter = await repo.listPracticesByStatus(PracticeStatus.CHURNED);
++      expect(churnedAfter.practices.map((p) => p.id)).toContain(PRACTICE_ID);
+     });
+   });
+ 
+@@ -76,13 +91,13 @@ describe("PracticeRepository", () => {
+     it("retrieves a practice by id", async () => {
+       await repo.upsertPractice(BASE_PRACTICE);
+ 
+-      const fetched = await repo.getPractice("ACCT-001");
++      const fetched = await repo.getPractice(PRACTICE_ID);
+       expect(fetched).not.toBeNull();
+-      expect(fetched?.name).toBe("Smith Family Practice");
++      expect(fetched?.name).toBe(PRACTICE_NAME);
+     });
+ 
+     it("returns null for a non-existent id", async () => {
+-      const fetched = await repo.getPractice("does-not-exist");
++      const fetched = await repo.getPractice(MISSING_PRACTICE_ID);
+       expect(fetched).toBeNull();
+     });
+   });
+@@ -91,23 +106,23 @@ describe("PracticeRepository", () => {
+     it("deletes an existing practice and returns true", async () => {
+       await repo.upsertPractice(BASE_PRACTICE);
+ 
+-      const deleted = await repo.deletePractice("ACCT-001");
++      const deleted = await repo.deletePractice(PRACTICE_ID);
+       expect(deleted).toBe(true);
+ 
+-      const fetched = await repo.getPractice("ACCT-001");
++      const fetched = await repo.getPractice(PRACTICE_ID);
+       expect(fetched).toBeNull();
+     });
+ 
+     it("returns false for a non-existent practice", async () => {
+-      const deleted = await repo.deletePractice("does-not-exist");
++      const deleted = await repo.deletePractice(MISSING_PRACTICE_ID);
+       expect(deleted).toBe(false);
+     });
+   });
+ 
+   describe("listPractices", () => {
+     it("returns all practices", async () => {
+-      await repo.upsertPractice(practice("p1", "Practice One", "SOLD", "Alice"));
+-      await repo.upsertPractice(practice("p2", "Practice Two", "CHURNED", "Bob"));
++      await repo.upsertPractice(practice("p1", "Practice One", PracticeStatus.SOLD, "Alice"));
++      await repo.upsertPractice(practice("p2", "Practice Two", PracticeStatus.CHURNED, "Bob"));
+ 
+       const result = await repo.listPractices();
+       expect(result.practices).toHaveLength(2);
+@@ -121,7 +136,7 @@ describe("PracticeRepository", () => {
+     it("paginates results", async () => {
+       await Promise.all(
+         Array.from({ length: 5 }, (_, i) =>
+-          repo.upsertPractice(practice(`page-${i}`, `Practice ${i}`, "SOLD", "Alice")),
++          repo.upsertPractice(practice(`page-${i}`, `Practice ${i}`, PracticeStatus.SOLD, "Alice")),
+         ),
+       );
+ 
+@@ -137,15 +152,17 @@ describe("PracticeRepository", () => {
+ 
+   describe("listPracticesByStatus", () => {
+     it("returns only practices with the given status", async () => {
+-      await repo.upsertPractice(practice("p1", "Sold Practice", "SOLD", "Alice"));
+-      await repo.upsertPractice(practice("p2", "Another Sold", "SOLD", "Bob"));
+-      await repo.upsertPractice(practice("p3", "Churned Practice", "CHURNED", "Carol"));
++      await repo.upsertPractice(practice("p1", "Sold Practice", PracticeStatus.SOLD, "Alice"));
++      await repo.upsertPractice(practice("p2", "Another Sold", PracticeStatus.SOLD, "Bob"));
++      await repo.upsertPractice(
++        practice("p3", "Churned Practice", PracticeStatus.CHURNED, "Carol"),
++      );
+ 
+-      const sold = await repo.listPracticesByStatus("SOLD");
++      const sold = await repo.listPracticesByStatus(PracticeStatus.SOLD);
+       expect(sold.practices).toHaveLength(2);
+-      expect(sold.practices.every((p) => p.status === "SOLD")).toBe(true);
++      expect(sold.practices.every((p) => p.status === PracticeStatus.SOLD)).toBe(true);
+ 
+-      const churned = await repo.listPracticesByStatus("CHURNED");
++      const churned = await repo.listPracticesByStatus(PracticeStatus.CHURNED);
+       expect(churned.practices).toHaveLength(1);
+       expect(churned.practices[0]?.id).toBe("p3");
+     });
+@@ -153,22 +170,22 @@ describe("PracticeRepository", () => {
+     it("returns empty array when no practices match the status", async () => {
+       await repo.upsertPractice(BASE_PRACTICE);
+ 
+-      const result = await repo.listPracticesByStatus("CHURNED");
++      const result = await repo.listPracticesByStatus(PracticeStatus.CHURNED);
+       expect(result.practices).toEqual([]);
+     });
+ 
+     it("paginates results", async () => {
+       await Promise.all(
+         Array.from({ length: 5 }, (_, i) =>
+-          repo.upsertPractice(practice(`sold-${i}`, `Practice ${i}`, "SOLD", "Alice")),
++          repo.upsertPractice(practice(`sold-${i}`, `Practice ${i}`, PracticeStatus.SOLD, "Alice")),
+         ),
+       );
+ 
+-      const page1 = await repo.listPracticesByStatus("SOLD", 3);
++      const page1 = await repo.listPracticesByStatus(PracticeStatus.SOLD, 3);
+       expect(page1.practices).toHaveLength(3);
+       expect(page1.nextCursor).toBeDefined();
+ 
+-      const page2 = await repo.listPracticesByStatus("SOLD", 3, page1.nextCursor);
++      const page2 = await repo.listPracticesByStatus(PracticeStatus.SOLD, 3, page1.nextCursor);
+       expect(page2.practices).toHaveLength(2);
+       expect(page2.nextCursor).toBeUndefined();
+     });
+@@ -176,11 +193,13 @@ describe("PracticeRepository", () => {
+ 
+   describe("listPracticesByName", () => {
+     it("returns practices matching the given name", async () => {
+-      await repo.upsertPractice(practice("p1", "Smith Family Practice", "SOLD", "Alice"));
+-      await repo.upsertPractice(practice("p2", "Smith Family Practice", "CHURNED", "Bob"));
+-      await repo.upsertPractice(practice("p3", "Riverdale Pediatrics", "SOLD", "Carol"));
++      await repo.upsertPractice(practice("p1", PRACTICE_NAME, PracticeStatus.SOLD, "Alice"));
++      await repo.upsertPractice(practice("p2", PRACTICE_NAME, PracticeStatus.CHURNED, "Bob"));
++      await repo.upsertPractice(
++        practice("p3", "Riverdale Pediatrics", PracticeStatus.SOLD, "Carol"),
++      );
+ 
+-      const result = await repo.listPracticesByName("Smith Family Practice");
++      const result = await repo.listPracticesByName(PRACTICE_NAME);
+       expect(result.practices).toHaveLength(2);
+       expect(result.practices.map((p) => p.id)).toContain("p1");
+       expect(result.practices.map((p) => p.id)).toContain("p2");
+@@ -203,15 +222,15 @@ describe("PracticeRepository", () => {
+     it("paginates results", async () => {
+       await Promise.all(
+         Array.from({ length: 5 }, (_, i) =>
+-          repo.upsertPractice(practice(`p${i}`, "Smith Family Practice", "SOLD", "Alice")),
++          repo.upsertPractice(practice(`p${i}`, PRACTICE_NAME, PracticeStatus.SOLD, "Alice")),
+         ),
+       );
+ 
+-      const page1 = await repo.listPracticesByName("Smith Family Practice", 3);
++      const page1 = await repo.listPracticesByName(PRACTICE_NAME, 3);
+       expect(page1.practices).toHaveLength(3);
+       expect(page1.nextCursor).toBeDefined();
+ 
+-      const page2 = await repo.listPracticesByName("Smith Family Practice", 3, page1.nextCursor);
++      const page2 = await repo.listPracticesByName(PRACTICE_NAME, 3, page1.nextCursor);
+       expect(page2.practices).toHaveLength(2);
+       expect(page2.nextCursor).toBeUndefined();
+     });
+@@ -219,11 +238,17 @@ describe("PracticeRepository", () => {
+ 
+   describe("listPracticesByAccountManager", () => {
+     it("returns practices for the given account manager", async () => {
+-      await repo.upsertPractice(practice("p1", "Practice One", "SOLD", "Jordan Lee"));
+-      await repo.upsertPractice(practice("p2", "Practice Two", "CHURNED", "Jordan Lee"));
+-      await repo.upsertPractice(practice("p3", "Practice Three", "SOLD", "Morgan Chen"));
++      await repo.upsertPractice(
++        practice("p1", "Practice One", PracticeStatus.SOLD, ACCOUNT_MANAGER),
++      );
++      await repo.upsertPractice(
++        practice("p2", "Practice Two", PracticeStatus.CHURNED, ACCOUNT_MANAGER),
++      );
++      await repo.upsertPractice(
++        practice("p3", "Practice Three", PracticeStatus.SOLD, "Morgan Chen"),
++      );
+ 
+-      const result = await repo.listPracticesByAccountManager("Jordan Lee");
++      const result = await repo.listPracticesByAccountManager(ACCOUNT_MANAGER);
+       expect(result.practices).toHaveLength(2);
+       expect(result.practices.map((p) => p.id)).toContain("p1");
+       expect(result.practices.map((p) => p.id)).toContain("p2");
+@@ -246,15 +271,17 @@ describe("PracticeRepository", () => {
+     it("paginates results", async () => {
+       await Promise.all(
+         Array.from({ length: 5 }, (_, i) =>
+-          repo.upsertPractice(practice(`p${i}`, `Practice ${i}`, "SOLD", "Jordan Lee")),
++          repo.upsertPractice(
++            practice(`p${i}`, `Practice ${i}`, PracticeStatus.SOLD, ACCOUNT_MANAGER),
++          ),
+         ),
+       );
+ 
+-      const page1 = await repo.listPracticesByAccountManager("Jordan Lee", 3);
++      const page1 = await repo.listPracticesByAccountManager(ACCOUNT_MANAGER, 3);
+       expect(page1.practices).toHaveLength(3);
+       expect(page1.nextCursor).toBeDefined();
+ 
+-      const page2 = await repo.listPracticesByAccountManager("Jordan Lee", 3, page1.nextCursor);
++      const page2 = await repo.listPracticesByAccountManager(ACCOUNT_MANAGER, 3, page1.nextCursor);
+       expect(page2.practices).toHaveLength(2);
+       expect(page2.nextCursor).toBeUndefined();
+     });
+@@ -264,12 +291,12 @@ describe("PracticeRepository", () => {
+     it("persists practiceEmail when provided", async () => {
+       const result = await repo.upsertPractice({
+         ...BASE_PRACTICE,
+-        practiceEmail: "reports@smithfamily.example",
++        practiceEmail: REPORTS_PRACTICE_EMAIL,
+       });
+-      expect(result.practiceEmail).toBe("reports@smithfamily.example");
++      expect(result.practiceEmail).toBe(REPORTS_PRACTICE_EMAIL);
+ 
+       const fetched = await repo.getPractice(BASE_PRACTICE.id);
+-      expect(fetched?.practiceEmail).toBe("reports@smithfamily.example");
++      expect(fetched?.practiceEmail).toBe(REPORTS_PRACTICE_EMAIL);
+     });
+ 
+     it("omits practiceEmail when not provided (backward compat)", async () => {
+@@ -280,17 +307,17 @@ describe("PracticeRepository", () => {
+     it("preserves a previously-set practiceEmail when a subsequent upsert omits it", async () => {
+       await repo.upsertPractice({
+         ...BASE_PRACTICE,
+-        practiceEmail: "reports@smithfamily.example",
++        practiceEmail: REPORTS_PRACTICE_EMAIL,
+       });
+ 
+       const updated = await repo.upsertPractice({
+         ...BASE_PRACTICE,
+         name: "Smith Family Practice Updated",
+       });
+-      expect(updated.practiceEmail).toBe("reports@smithfamily.example");
++      expect(updated.practiceEmail).toBe(REPORTS_PRACTICE_EMAIL);
+ 
+       const fetched = await repo.getPractice(BASE_PRACTICE.id);
+-      expect(fetched?.practiceEmail).toBe("reports@smithfamily.example");
++      expect(fetched?.practiceEmail).toBe(REPORTS_PRACTICE_EMAIL);
+     });
+   });
+ 
+@@ -298,12 +325,12 @@ describe("PracticeRepository", () => {
+     it("persists lastReferralDate when provided", async () => {
+       const result = await repo.upsertPractice({
+         ...BASE_PRACTICE,
+-        lastReferralDate: "2026-05-15",
++        lastReferralDate: LAST_REFERRAL_DATE,
+       });
+-      expect(result.lastReferralDate).toBe("2026-05-15");
++      expect(result.lastReferralDate).toBe(LAST_REFERRAL_DATE);
+ 
+       const fetched = await repo.getPractice(BASE_PRACTICE.id);
+-      expect(fetched?.lastReferralDate).toBe("2026-05-15");
++      expect(fetched?.lastReferralDate).toBe(LAST_REFERRAL_DATE);
+     });
+ 
+     it("omits lastReferralDate when not provided (backward compat)", async () => {
+@@ -314,39 +341,241 @@ describe("PracticeRepository", () => {
+ 
+   describe("listAccountManagers", () => {
+     it("returns distinct account manager names (order not guaranteed)", async () => {
+-      await repo.upsertPractice(practice("p1", "Practice One", "SOLD", "Jordan Lee"));
+-      await repo.upsertPractice(practice("p2", "Practice Two", "CHURNED", "Alice Smith"));
+-      await repo.upsertPractice(practice("p3", "Practice Three", "SOLD", "Jordan Lee"));
++      await repo.upsertPractice(
++        practice("p1", "Practice One", PracticeStatus.SOLD, ACCOUNT_MANAGER),
++      );
++      await repo.upsertPractice(
++        practice("p2", "Practice Two", PracticeStatus.CHURNED, "Alice Smith"),
++      );
++      await repo.upsertPractice(
++        practice("p3", "Practice Three", PracticeStatus.SOLD, ACCOUNT_MANAGER),
++      );
+ 
+       // The repo returns the distinct set unsorted; the service (listAccountManagers) owns display
+       // ordering, so assert membership rather than order.
+       const result = await repo.listAccountManagers();
+-      expect([...result].sort()).toEqual(["Alice Smith", "Jordan Lee"]);
++      expect([...result].sort()).toEqual(["Alice Smith", ACCOUNT_MANAGER]);
+     });
+ 
+     it("excludes practices with no account manager", async () => {
+-      await repo.upsertPractice({ id: "p1", name: "No AM Practice", status: "SOLD" });
+-      await repo.upsertPractice(practice("p2", "With AM", "SOLD", "Jordan Lee"));
++      await repo.upsertPractice({ id: "p1", name: "No AM Practice", status: PracticeStatus.SOLD });
++      await repo.upsertPractice(practice("p2", "With AM", PracticeStatus.SOLD, ACCOUNT_MANAGER));
+ 
+       const result = await repo.listAccountManagers();
+-      expect(result).toEqual(["Jordan Lee"]);
++      expect(result).toEqual([ACCOUNT_MANAGER]);
+     });
+ 
+     it("returns empty array when no practices have account managers", async () => {
+-      await repo.upsertPractice({ id: "p1", name: "No AM Practice", status: "SOLD" });
++      await repo.upsertPractice({ id: "p1", name: "No AM Practice", status: PracticeStatus.SOLD });
+ 
+       const result = await repo.listAccountManagers();
+       expect(result).toEqual([]);
+     });
+ 
+     it("reflects new account managers added after a previous call", async () => {
+-      await repo.upsertPractice(practice("p1", "Practice One", "SOLD", "Jordan Lee"));
++      await repo.upsertPractice(
++        practice("p1", "Practice One", PracticeStatus.SOLD, ACCOUNT_MANAGER),
++      );
+       await repo.listAccountManagers();
+ 
+-      await repo.upsertPractice(practice("p2", "Practice Two", "SOLD", "Alice Smith"));
++      await repo.upsertPractice(practice("p2", "Practice Two", PracticeStatus.SOLD, "Alice Smith"));
+ 
+       const result = await repo.listAccountManagers();
+       expect(result).toContain("Alice Smith");
+     });
+   });
++
++  describe("createPractice", () => {
++    it("persists a new practice with server-assigned timestamps", async () => {
++      const created = await repo.createPractice(BASE_PRACTICE);
++
++      expect(created.id).toBe(BASE_PRACTICE.id);
++      expect(created.name).toBe(BASE_PRACTICE.name);
++      expect(created.status).toBe(PracticeStatus.SOLD);
++      expect(created.createdAt).toBeInstanceOf(Date);
++      expect(created.updatedAt).toBeInstanceOf(Date);
++
++      const fetched = await repo.getPractice(BASE_PRACTICE.id);
++      expect(fetched?.name).toBe(BASE_PRACTICE.name);
++    });
++
++    it("rejects a duplicate id without mutating the stored record", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await expect(
++        repo.createPractice({ ...BASE_PRACTICE, name: "Impostor Practice" }),
++      ).rejects.toThrow(ConflictError);
++
++      const fetched = await repo.getPractice(BASE_PRACTICE.id);
++      expect(fetched?.name).toBe(BASE_PRACTICE.name);
++    });
++
++    it("makes the record findable via the account-manager GSI", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      const result = await repo.listPracticesByAccountManager(BASE_PRACTICE.accountManager);
++      expect(result.practices.map((p) => p.id)).toContain(BASE_PRACTICE.id);
++    });
++
++    it("omits optional fields that were not supplied", async () => {
++      const created = await repo.createPractice({
++        id: "p-minimal",
++        name: "Minimal Practice",
++        status: PracticeStatus.SOLD,
++      });
++
++      expect(created.accountManager).toBeUndefined();
++      expect(created.practiceEmail).toBeUndefined();
++      expect(created.lastReferralDate).toBeUndefined();
++    });
++
++    it("returns the same record a subsequent read yields", async () => {
++      const created = await repo.createPractice({
++        ...BASE_PRACTICE,
++        practiceEmail: PRACTICE_EMAIL,
++        lastReferralDate: LAST_REFERRAL_DATE,
++      });
++
++      const fetched = await repo.getPractice(BASE_PRACTICE.id);
++      expect(fetched).toEqual(created);
++    });
++  });
++
++  describe("patchPractice", () => {
++    it("applies only the supplied field and leaves the rest unchanged", async () => {
++      const created = await repo.createPractice({
++        ...BASE_PRACTICE,
++        practiceEmail: PRACTICE_EMAIL,
++        lastReferralDate: LAST_REFERRAL_DATE,
++      });
++
++      const patched = await repo.patchPractice(BASE_PRACTICE.id, {
++        status: PracticeStatus.CHURNED,
++      });
++
++      expect(patched).toEqual({
++        ...created,
++        status: PracticeStatus.CHURNED,
++        updatedAt: patched?.updatedAt,
++      });
++    });
++
++    it("returns null for a missing id and creates nothing", async () => {
++      const result = await repo.patchPractice(MISSING_PRACTICE_ID, { name: "Ghost Practice" });
++
++      expect(result).toBeNull();
++      expect(await repo.getPractice(MISSING_PRACTICE_ID)).toBeNull();
++    });
++
++    it("removes an optional attribute when the field is null, rather than storing null", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: PRACTICE_EMAIL });
++
++      const patched = await repo.patchPractice(BASE_PRACTICE.id, { practiceEmail: null });
++
++      expect(patched?.practiceEmail).toBeUndefined();
++      expect(patched && "practiceEmail" in patched).toBe(false);
++    });
++
++    it("drops the GSI3 entry when accountManager is cleared", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++      const before = await repo.listPracticesByAccountManager(BASE_PRACTICE.accountManager);
++      expect(before.practices.map((p) => p.id)).toContain(BASE_PRACTICE.id);
++
++      await repo.patchPractice(BASE_PRACTICE.id, { accountManager: null });
++
++      const after = await repo.listPracticesByAccountManager(BASE_PRACTICE.accountManager);
++      expect(after.practices.map((p) => p.id)).not.toContain(BASE_PRACTICE.id);
++      expect(await repo.getPractice(BASE_PRACTICE.id)).not.toBeNull();
++    });
++
++    it("moves the GSI2 partition when name changes", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await repo.patchPractice(BASE_PRACTICE.id, { name: RENAMED_PRACTICE_NAME });
++
++      const byOldName = await repo.listPracticesByName(BASE_PRACTICE.name);
++      expect(byOldName.practices.map((p) => p.id)).not.toContain(BASE_PRACTICE.id);
++
++      const byNewName = await repo.listPracticesByName(RENAMED_PRACTICE_NAME);
++      expect(byNewName.practices.map((p) => p.id)).toContain(BASE_PRACTICE.id);
++    });
++
++    it("moves the GSI1 partition when status changes", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await repo.patchPractice(BASE_PRACTICE.id, { status: PracticeStatus.CHURNED });
++
++      const sold = await repo.listPracticesByStatus(PracticeStatus.SOLD);
++      expect(sold.practices.map((p) => p.id)).not.toContain(BASE_PRACTICE.id);
++
++      const churned = await repo.listPracticesByStatus(PracticeStatus.CHURNED);
++      expect(churned.practices.map((p) => p.id)).toContain(BASE_PRACTICE.id);
++    });
++
++    it("moves the GSI3 partition when accountManager changes to a new value", async () => {
++      await repo.createPractice(BASE_PRACTICE);
++
++      await repo.patchPractice(BASE_PRACTICE.id, { accountManager: OTHER_ACCOUNT_MANAGER });
++
++      const oldAm = await repo.listPracticesByAccountManager(BASE_PRACTICE.accountManager);
++      expect(oldAm.practices.map((p) => p.id)).not.toContain(BASE_PRACTICE.id);
++
++      const newAm = await repo.listPracticesByAccountManager(OTHER_ACCOUNT_MANAGER);
++      expect(newAm.practices.map((p) => p.id)).toContain(BASE_PRACTICE.id);
++    });
++
++    it("advances updatedAt and preserves createdAt", async () => {
++      const created = await repo.createPractice(BASE_PRACTICE);
++      await new Promise((resolve) => setTimeout(resolve, 25));
++
++      const patched = await repo.patchPractice(BASE_PRACTICE.id, { name: RENAMED_PRACTICE_NAME });
++
++      expect(patched?.createdAt.getTime()).toBe(created.createdAt.getTime());
++      expect(patched?.updatedAt.getTime()).toBeGreaterThan(created.updatedAt.getTime());
++    });
++
++    it("leaves a stored value in place when its key is omitted — omission is not a clear", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: PRACTICE_EMAIL });
++
++      const patched = await repo.patchPractice(BASE_PRACTICE.id, { name: RENAMED_PRACTICE_NAME });
++
++      expect(patched?.practiceEmail).toBe(PRACTICE_EMAIL);
++    });
++
++    it("sets one field and clears another in a single patch", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: PRACTICE_EMAIL });
++
++      const patched = await repo.patchPractice(BASE_PRACTICE.id, {
++        name: RENAMED_PRACTICE_NAME,
++        practiceEmail: null,
++      });
++
++      expect(patched?.name).toBe(RENAMED_PRACTICE_NAME);
++      expect(patched?.practiceEmail).toBeUndefined();
++    });
++
++    it("clears fields with no field left to set", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: PRACTICE_EMAIL });
++
++      const patched = await repo.patchPractice(BASE_PRACTICE.id, {
++        accountManager: null,
++        practiceEmail: null,
++      });
++
++      expect(patched?.accountManager).toBeUndefined();
++      expect(patched?.practiceEmail).toBeUndefined();
++      expect(patched?.name).toBe(BASE_PRACTICE.name);
++    });
++
++    it("returns the same record a subsequent read yields", async () => {
++      await repo.createPractice({ ...BASE_PRACTICE, practiceEmail: PRACTICE_EMAIL });
++
++      const patched = await repo.patchPractice(BASE_PRACTICE.id, {
++        name: RENAMED_PRACTICE_NAME,
++        practiceEmail: null,
++      });
++
++      expect(await repo.getPractice(BASE_PRACTICE.id)).toEqual(patched);
++    });
++  });
+ });
+diff --git a/packages/data/src/__tests__/repository/referral-repository.test.ts b/packages/data/src/__tests__/repository/referral-repository.test.ts
+index 6f4247e3..feb39696 100644
+--- a/packages/data/src/__tests__/repository/referral-repository.test.ts
++++ b/packages/data/src/__tests__/repository/referral-repository.test.ts
+@@ -1,27 +1,46 @@
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { ConflictError } from "../../errors";
++import { LeadStage, LeadType } from "../../model";
+ import { ReferralRepository } from "../../repository/referral-repository";
+ import { clearAllItems } from "../../test-utils";
+ 
++const REFERRAL_ID = "abc123";
++const LEAD_ID = "SF-LEAD-001";
++const FULL_NAME = "Jane Doe";
++const REFERRER_NAME = "Dr. Smith";
++const PROVIDER_ID = "a0b1c2d3-e4f5-5000-8000-000000000001";
++const PRACTICE_NAME = "Smith Family Practice";
++const SOURCE_RUN_ID = "hex-run-001";
++
+ const BASE_REFERRAL = {
+-  id: "abc123",
+-  leadId: "SF-LEAD-001",
+-  fullName: "Jane Doe",
++  id: REFERRAL_ID,
++  leadId: LEAD_ID,
++  fullName: FULL_NAME,
+   mobile: "555-111-2222",
+   email: "jane@example.com",
+-  cleanReferrerName: "Dr. Smith",
+-  referringProviderId: "a0b1c2d3-e4f5-5000-8000-000000000001",
++  cleanReferrerName: REFERRER_NAME,
++  referringProviderId: PROVIDER_ID,
+   networkName: "Blue Shield",
+   insuranceCarrier: "BCBS",
+   utmSource: "pcp",
+-  practiceName: "Smith Family Practice",
+-  practiceOwnerName: "Dr. Smith",
++  practiceName: PRACTICE_NAME,
++  practiceOwnerName: REFERRER_NAME,
+   practiceAccountId: "ACCT-001",
+-  sourceRunId: "hex-run-001",
++  sourceRunId: SOURCE_RUN_ID,
+   producedAt: "2026-07-13T00:00:00Z",
+   createdDate: "2026-07-01T00:00:00Z",
+-  therapyOrPsychLead: "THERAPY_ONLY" as const,
++  therapyOrPsychLead: LeadType.THERAPY_ONLY,
+ };
+ 
++const MISSING_REFERRAL_ID = "does-not-exist";
++const OTHER_PROVIDER_ID = "a0b1c2d3-e4f5-5000-8000-000000000002";
++const OTHER_REFERRER_NAME = "Dr. Jones";
++const OTHER_PRACTICE_NAME = "Jones Family Practice";
++const RENAMED_FULL_NAME = "Jane Roe";
++const UPDATED_SOURCE_RUN_ID = "hex-run-002";
++const THERAPY_LEAD_SUBSTAGE_VOB_FAILED = "vob_failed";
++const THERAPY_LEAD_SUBSTAGE_CONVERTED = "converted_to_patient";
++
+ describe("ReferralRepository", () => {
+   let repo: ReferralRepository;
+ 
+@@ -37,11 +56,11 @@ describe("ReferralRepository", () => {
+     it("creates a referral when it does not exist", async () => {
+       const referral = await repo.upsertReferral(BASE_REFERRAL);
+ 
+-      expect(referral.id).toBe("abc123");
+-      expect(referral.leadId).toBe("SF-LEAD-001");
+-      expect(referral.fullName).toBe("Jane Doe");
+-      expect(referral.practiceName).toBe("Smith Family Practice");
+-      expect(referral.sourceRunId).toBe("hex-run-001");
++      expect(referral.id).toBe(REFERRAL_ID);
++      expect(referral.leadId).toBe(LEAD_ID);
++      expect(referral.fullName).toBe(FULL_NAME);
++      expect(referral.practiceName).toBe(PRACTICE_NAME);
++      expect(referral.sourceRunId).toBe(SOURCE_RUN_ID);
+       expect(referral.createdAt).toBeInstanceOf(Date);
+       expect(referral.updatedAt).toBeInstanceOf(Date);
+     });
+@@ -52,13 +71,13 @@ describe("ReferralRepository", () => {
+       const updated = await repo.upsertReferral({
+         ...BASE_REFERRAL,
+         fullName: "Jane Updated",
+-        sourceRunId: "hex-run-002",
++        sourceRunId: UPDATED_SOURCE_RUN_ID,
+       });
+ 
+       expect(updated.fullName).toBe("Jane Updated");
+-      expect(updated.sourceRunId).toBe("hex-run-002");
++      expect(updated.sourceRunId).toBe(UPDATED_SOURCE_RUN_ID);
+ 
+-      const fetched = await repo.getReferral("abc123");
++      const fetched = await repo.getReferral(REFERRAL_ID);
+       expect(fetched?.fullName).toBe("Jane Updated");
+     });
+ 
+@@ -74,7 +93,7 @@ describe("ReferralRepository", () => {
+         practiceName: BASE_REFERRAL.practiceName,
+         createdDate: BASE_REFERRAL.createdDate,
+         therapyOrPsychLead: BASE_REFERRAL.therapyOrPsychLead,
+-        sourceRunId: "hex-run-002",
++        sourceRunId: UPDATED_SOURCE_RUN_ID,
+         producedAt: BASE_REFERRAL.producedAt,
+         // email, mobile, networkName, etc. intentionally omitted
+       });
+@@ -92,27 +111,27 @@ describe("ReferralRepository", () => {
+     it("round-trips new stage fields", async () => {
+       const referral = await repo.upsertReferral({
+         ...BASE_REFERRAL,
+-        therapyLeadStage: "SCHEDULED",
+-        psychLeadStage: "LEAD",
+-        therapyLeadSubstage: "converted_to_patient",
++        therapyLeadStage: LeadStage.SCHEDULED,
++        psychLeadStage: LeadStage.LEAD,
++        therapyLeadSubstage: THERAPY_LEAD_SUBSTAGE_CONVERTED,
+       });
+ 
+-      expect(referral.therapyLeadStage).toBe("SCHEDULED");
+-      expect(referral.psychLeadStage).toBe("LEAD");
+-      expect(referral.therapyLeadSubstage).toBe("converted_to_patient");
++      expect(referral.therapyLeadStage).toBe(LeadStage.SCHEDULED);
++      expect(referral.psychLeadStage).toBe(LeadStage.LEAD);
++      expect(referral.therapyLeadSubstage).toBe(THERAPY_LEAD_SUBSTAGE_CONVERTED);
+ 
+       const fetched = await repo.getReferral(BASE_REFERRAL.id);
+-      expect(fetched?.therapyLeadStage).toBe("SCHEDULED");
+-      expect(fetched?.psychLeadStage).toBe("LEAD");
+-      expect(fetched?.therapyLeadSubstage).toBe("converted_to_patient");
++      expect(fetched?.therapyLeadStage).toBe(LeadStage.SCHEDULED);
++      expect(fetched?.psychLeadStage).toBe(LeadStage.LEAD);
++      expect(fetched?.therapyLeadSubstage).toBe(THERAPY_LEAD_SUBSTAGE_CONVERTED);
+     });
+ 
+     it("clears new stage fields when absent on re-ingest", async () => {
+       await repo.upsertReferral({
+         ...BASE_REFERRAL,
+-        therapyLeadStage: "SCHEDULED",
+-        psychLeadStage: "LEAD",
+-        therapyLeadSubstage: "converted_to_patient",
++        therapyLeadStage: LeadStage.SCHEDULED,
++        psychLeadStage: LeadStage.LEAD,
++        therapyLeadSubstage: THERAPY_LEAD_SUBSTAGE_CONVERTED,
+       });
+ 
+       const updated = await repo.upsertReferral(BASE_REFERRAL);
+@@ -155,11 +174,11 @@ describe("ReferralRepository", () => {
+         id: "minimal-id",
+         leadId: "SF-LEAD-MIN",
+         fullName: "Minimal Patient",
+-        cleanReferrerName: "Dr. Jones",
+-        referringProviderId: "a0b1c2d3-e4f5-5000-8000-000000000002",
++        cleanReferrerName: OTHER_REFERRER_NAME,
++        referringProviderId: OTHER_PROVIDER_ID,
+         practiceName: "unknown",
+         createdDate: "2026-07-13T00:00:00Z",
+-        therapyOrPsychLead: "THERAPY_ONLY",
++        therapyOrPsychLead: LeadType.THERAPY_ONLY,
+       });
+ 
+       expect(referral.id).toBe("minimal-id");
+@@ -178,7 +197,7 @@ describe("ReferralRepository", () => {
+ 
+       await Promise.all(rows.map((r) => repo.upsertReferral(r)));
+ 
+-      const result = await repo.listReferralsByPractice("Smith Family Practice", 50);
++      const result = await repo.listReferralsByPractice(PRACTICE_NAME, 50);
+       expect(result.referrals).toHaveLength(30);
+     });
+   });
+@@ -187,13 +206,13 @@ describe("ReferralRepository", () => {
+     it("retrieves a referral by id", async () => {
+       await repo.upsertReferral(BASE_REFERRAL);
+ 
+-      const fetched = await repo.getReferral("abc123");
++      const fetched = await repo.getReferral(REFERRAL_ID);
+       expect(fetched).not.toBeNull();
+-      expect(fetched?.leadId).toBe("SF-LEAD-001");
++      expect(fetched?.leadId).toBe(LEAD_ID);
+     });
+ 
+     it("returns null for a non-existent id", async () => {
+-      const fetched = await repo.getReferral("does-not-exist");
++      const fetched = await repo.getReferral(MISSING_REFERRAL_ID);
+       expect(fetched).toBeNull();
+     });
+   });
+@@ -202,15 +221,15 @@ describe("ReferralRepository", () => {
+     it("deletes an existing referral and returns true", async () => {
+       await repo.upsertReferral(BASE_REFERRAL);
+ 
+-      const deleted = await repo.deleteReferral("abc123");
++      const deleted = await repo.deleteReferral(REFERRAL_ID);
+       expect(deleted).toBe(true);
+ 
+-      const fetched = await repo.getReferral("abc123");
++      const fetched = await repo.getReferral(REFERRAL_ID);
+       expect(fetched).toBeNull();
+     });
+ 
+     it("returns false for a non-existent referral", async () => {
+-      const deleted = await repo.deleteReferral("does-not-exist");
++      const deleted = await repo.deleteReferral(MISSING_REFERRAL_ID);
+       expect(deleted).toBe(false);
+     });
+ 
+@@ -273,7 +292,7 @@ describe("ReferralRepository", () => {
+         practiceName: "Other Practice",
+       });
+ 
+-      const result = await repo.listReferralsByPractice("Smith Family Practice");
++      const result = await repo.listReferralsByPractice(PRACTICE_NAME);
+       expect(result.referrals).toHaveLength(2);
+       expect(result.referrals.map((r) => r.id)).toContain("r1");
+       expect(result.referrals.map((r) => r.id)).toContain("r2");
+@@ -291,15 +310,11 @@ describe("ReferralRepository", () => {
+         ),
+       );
+ 
+-      const page1 = await repo.listReferralsByPractice("Smith Family Practice", 3);
++      const page1 = await repo.listReferralsByPractice(PRACTICE_NAME, 3);
+       expect(page1.referrals).toHaveLength(3);
+       expect(page1.nextCursor).toBeDefined();
+ 
+-      const page2 = await repo.listReferralsByPractice(
+-        "Smith Family Practice",
+-        3,
+-        page1.nextCursor,
+-      );
++      const page2 = await repo.listReferralsByPractice(PRACTICE_NAME, 3, page1.nextCursor);
+       expect(page2.referrals).toHaveLength(2);
+       expect(page2.nextCursor).toBeUndefined();
+     });
+@@ -316,7 +331,7 @@ describe("ReferralRepository", () => {
+         fullName: "Other Patient",
+       });
+ 
+-      const result = await repo.listReferralsByFullName("Jane Doe");
++      const result = await repo.listReferralsByFullName(FULL_NAME);
+       expect(result.referrals).toHaveLength(2);
+       expect(result.referrals.map((r) => r.id)).toContain("fn1");
+       expect(result.referrals.map((r) => r.id)).toContain("fn2");
+@@ -345,10 +360,10 @@ describe("ReferralRepository", () => {
+         ...BASE_REFERRAL,
+         id: "rr3",
+         leadId: "L3",
+-        cleanReferrerName: "Dr. Jones",
++        cleanReferrerName: OTHER_REFERRER_NAME,
+       });
+ 
+-      const result = await repo.listReferralsByReferrer("Dr. Smith");
++      const result = await repo.listReferralsByReferrer(REFERRER_NAME);
+       expect(result.referrals).toHaveLength(2);
+       expect(result.referrals.map((r) => r.id)).toContain("rr1");
+       expect(result.referrals.map((r) => r.id)).toContain("rr2");
+@@ -371,14 +386,13 @@ describe("ReferralRepository", () => {
+ 
+   describe("listReferralsByProviderId", () => {
+     it("lists referrals for a given referringProviderId", async () => {
+-      const otherProviderId = "a0b1c2d3-e4f5-5000-8000-000000000002";
+       await repo.upsertReferral({ ...BASE_REFERRAL, id: "rp1", leadId: "L1" });
+       await repo.upsertReferral({ ...BASE_REFERRAL, id: "rp2", leadId: "L2" });
+       await repo.upsertReferral({
+         ...BASE_REFERRAL,
+         id: "rp3",
+         leadId: "L3",
+-        referringProviderId: otherProviderId,
++        referringProviderId: OTHER_PROVIDER_ID,
+       });
+ 
+       const result = await repo.listReferralsByProviderId(BASE_REFERRAL.referringProviderId);
+@@ -430,7 +444,7 @@ describe("ReferralRepository", () => {
+       });
+ 
+       const stats = await repo.aggregatePracticeStats();
+-      expect(stats["Smith Family Practice"]?.totalReferrals).toBe(2);
++      expect(stats[PRACTICE_NAME]?.totalReferrals).toBe(2);
+       expect(stats["Other Practice"]?.totalReferrals).toBe(1);
+     });
+ 
+@@ -441,11 +455,11 @@ describe("ReferralRepository", () => {
+         ...BASE_REFERRAL,
+         id: "r3",
+         leadId: "L3",
+-        cleanReferrerName: "Dr. Jones",
++        cleanReferrerName: OTHER_REFERRER_NAME,
+       });
+ 
+       const stats = await repo.aggregatePracticeStats();
+-      expect(stats["Smith Family Practice"]?.referringProviderCount).toBe(2);
++      expect(stats[PRACTICE_NAME]?.referringProviderCount).toBe(2);
+     });
+ 
+     it("does not double-count the same referrer", async () => {
+@@ -453,7 +467,161 @@ describe("ReferralRepository", () => {
+       await repo.upsertReferral({ ...BASE_REFERRAL, id: "r2", leadId: "L2" });
+ 
+       const stats = await repo.aggregatePracticeStats();
+-      expect(stats["Smith Family Practice"]?.referringProviderCount).toBe(1);
++      expect(stats[PRACTICE_NAME]?.referringProviderCount).toBe(1);
++    });
++  });
++
++  describe("createReferral", () => {
++    it("persists all required and supplied optional fields", async () => {
++      const created = await repo.createReferral({
++        ...BASE_REFERRAL,
++        therapyLeadStage: LeadStage.LEAD,
++        psychLeadStage: LeadStage.CONTACT,
++      });
++
++      expect(created).toMatchObject({
++        ...BASE_REFERRAL,
++        therapyLeadStage: LeadStage.LEAD,
++        psychLeadStage: LeadStage.CONTACT,
++      });
++      expect(created.createdAt).toBeInstanceOf(Date);
++      expect(created.updatedAt).toBeInstanceOf(Date);
++    });
++
++    it("rejects a duplicate id without mutating the stored record", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      await expect(
++        repo.createReferral({ ...BASE_REFERRAL, fullName: "Impostor Name" }),
++      ).rejects.toThrow(ConflictError);
++
++      const fetched = await repo.getReferral(BASE_REFERRAL.id);
++      expect(fetched?.fullName).toBe(BASE_REFERRAL.fullName);
++    });
++
++    it("is findable under all four GSIs", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      const byPractice = await repo.listReferralsByPractice(BASE_REFERRAL.practiceName);
++      const byReferrer = await repo.listReferralsByReferrer(BASE_REFERRAL.cleanReferrerName);
++      const byFullName = await repo.listReferralsByFullName(BASE_REFERRAL.fullName);
++      const byProviderId = await repo.listReferralsByProviderId(BASE_REFERRAL.referringProviderId);
++
++      expect(byPractice.referrals.map((r) => r.id)).toContain(BASE_REFERRAL.id);
++      expect(byReferrer.referrals.map((r) => r.id)).toContain(BASE_REFERRAL.id);
++      expect(byFullName.referrals.map((r) => r.id)).toContain(BASE_REFERRAL.id);
++      expect(byProviderId.referrals.map((r) => r.id)).toContain(BASE_REFERRAL.id);
++    });
++
++    it("returns the same record a subsequent read yields", async () => {
++      const created = await repo.createReferral({
++        ...BASE_REFERRAL,
++        therapyLeadStage: LeadStage.LEAD,
++        psychLeadStage: LeadStage.CONTACT,
++      });
++
++      const fetched = await repo.getReferral(BASE_REFERRAL.id);
++      expect(fetched).toEqual(created);
++    });
++  });
++
++  describe("patchReferral", () => {
++    it("leaves every other field byte-identical when one stage field is patched", async () => {
++      const created = await repo.createReferral({
++        ...BASE_REFERRAL,
++        therapyLeadStage: LeadStage.LEAD,
++        psychLeadStage: LeadStage.LEAD,
++        therapyLeadSubstage: THERAPY_LEAD_SUBSTAGE_VOB_FAILED,
++      });
++
++      const patched = await repo.patchReferral(BASE_REFERRAL.id, {
++        therapyLeadStage: LeadStage.SCHEDULED,
++      });
++
++      expect(patched).toEqual({
++        ...created,
++        therapyLeadStage: LeadStage.SCHEDULED,
++        updatedAt: patched?.updatedAt,
++      });
++    });
++
++    it("returns null for a missing id and creates nothing", async () => {
++      const result = await repo.patchReferral(MISSING_REFERRAL_ID, { fullName: "Ghost" });
++
++      expect(result).toBeNull();
++      expect(await repo.getReferral(MISSING_REFERRAL_ID)).toBeNull();
++    });
++
++    it("removes only the nulled optional field, leaving the other optionals intact", async () => {
++      const created = await repo.createReferral(BASE_REFERRAL);
++
++      const patched = await repo.patchReferral(BASE_REFERRAL.id, { mobile: null });
++
++      expect(patched?.mobile).toBeUndefined();
++      expect(patched && "mobile" in patched).toBe(false);
++      expect(patched).toEqual({
++        ...created,
++        mobile: undefined,
++        updatedAt: patched?.updatedAt,
++      });
++    });
++
++    it("moves GSI1 when practiceName changes", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      await repo.patchReferral(BASE_REFERRAL.id, { practiceName: OTHER_PRACTICE_NAME });
++
++      const byOld = await repo.listReferralsByPractice(BASE_REFERRAL.practiceName);
++      expect(byOld.referrals.map((r) => r.id)).not.toContain(BASE_REFERRAL.id);
++
++      const byNew = await repo.listReferralsByPractice(OTHER_PRACTICE_NAME);
++      expect(byNew.referrals.map((r) => r.id)).toContain(BASE_REFERRAL.id);
++    });
++
++    it("moves GSI3 when fullName changes", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      await repo.patchReferral(BASE_REFERRAL.id, { fullName: RENAMED_FULL_NAME });
++
++      const byOld = await repo.listReferralsByFullName(BASE_REFERRAL.fullName);
++      expect(byOld.referrals.map((r) => r.id)).not.toContain(BASE_REFERRAL.id);
++
++      const byNew = await repo.listReferralsByFullName(RENAMED_FULL_NAME);
++      expect(byNew.referrals.map((r) => r.id)).toContain(BASE_REFERRAL.id);
++    });
++
++    it("advances updatedAt and preserves createdAt", async () => {
++      const created = await repo.createReferral(BASE_REFERRAL);
++      await new Promise((resolve) => setTimeout(resolve, 25));
++
++      const patched = await repo.patchReferral(BASE_REFERRAL.id, { fullName: RENAMED_FULL_NAME });
++
++      expect(patched?.createdAt.getTime()).toBe(created.createdAt.getTime());
++      expect(patched?.updatedAt.getTime()).toBeGreaterThan(created.updatedAt.getTime());
++    });
++
++    it("clears fields with no field left to set", async () => {
++      const created = await repo.createReferral(BASE_REFERRAL);
++
++      const patched = await repo.patchReferral(BASE_REFERRAL.id, {
++        mobile: null,
++        email: null,
++      });
++
++      expect(patched?.mobile).toBeUndefined();
++      expect(patched?.email).toBeUndefined();
++      expect(patched?.networkName).toBe(created.networkName);
++    });
++
++    it("returns the same record a subsequent read yields", async () => {
++      await repo.createReferral(BASE_REFERRAL);
++
++      const patched = await repo.patchReferral(BASE_REFERRAL.id, {
++        fullName: RENAMED_FULL_NAME,
++        mobile: null,
++      });
++
++      expect(await repo.getReferral(BASE_REFERRAL.id)).toEqual(patched);
+     });
+   });
+ });
+diff --git a/packages/data/src/errors.ts b/packages/data/src/errors.ts
+index 8b6dc77c..bd501407 100644
+--- a/packages/data/src/errors.ts
++++ b/packages/data/src/errors.ts
+@@ -11,3 +11,10 @@ export class NotFoundError extends Error {
+     this.name = "NotFoundError";
+   }
+ }
++
++export class ConflictError extends Error {
++  constructor(message = "Resource already exists") {
++    super(message);
++    this.name = "ConflictError";
++  }
++}
+diff --git a/packages/data/src/model/types.ts b/packages/data/src/model/types.ts
+index d7234223..863a32c2 100644
+--- a/packages/data/src/model/types.ts
++++ b/packages/data/src/model/types.ts
+@@ -5,6 +5,7 @@ import type {
+   NonOverlappingProperties,
+   RequiredKeys,
+   UpdateEntityItem,
++  UpdateRemoveEntityItem,
+ } from "electrodb";
+ 
+ export const PracticeStatus = {
+@@ -192,6 +193,9 @@ export type IdentityFields<Model extends ModelBase, Entity extends EntityBase> =
+   IdentityKeys<Entity>
+ >;
+ 
++export type RemovableKeys<Entity extends EntityBase> =
++  UpdateRemoveEntityItem<Entity> extends Array<infer Attr> ? Attr & string : never;
++
+ // Internal helpers for defining UpsertFields and PatchFields
+ // Core concepts:
+ //   PutXxx = fields required for put operations (create/upsert)
+diff --git a/packages/data/src/repository/patch-fields.ts b/packages/data/src/repository/patch-fields.ts
+new file mode 100644
+index 00000000..16702cb3
+--- /dev/null
++++ b/packages/data/src/repository/patch-fields.ts
+@@ -0,0 +1,41 @@
++type NullableKeys<T> = { [K in keyof T]-?: null extends T[K] ? K : never }[keyof T];
++
++type SettableFields<T> = { [K in keyof T]?: Exclude<T[K], null> };
++
++export function splitPatchFields<T extends Record<string, unknown>>(
++  fields: T,
++): { toSet: SettableFields<T>; toRemove: (NullableKeys<T> & string)[] } {
++  const toSet: Record<string, unknown> = {};
++  const toRemove: string[] = [];
++
++  for (const [key, value] of Object.entries(fields)) {
++    if (value === null) {
++      toRemove.push(key);
++    } else if (value !== undefined) {
++      toSet[key] = value;
++    }
++  }
++
++  return {
++    toSet: toSet as SettableFields<T>,
++    toRemove: toRemove as (NullableKeys<T> & string)[],
++  };
++}
++
++interface PatchChain<SetFields, RemoveKeys extends readonly unknown[], Op> {
++  set(fields: SetFields): Op;
++  remove(attributes: RemoveKeys): Op;
++}
++
++export function buildPatchOperation<
++  SetFields extends Record<string, unknown>,
++  RemoveKeys extends readonly unknown[],
++  Op extends PatchChain<SetFields, RemoveKeys, Op>,
++>(patch: PatchChain<SetFields, RemoveKeys, Op>, toSet: SetFields, toRemove: RemoveKeys): Op {
++  if (Object.keys(toSet).length === 0) {
++    return patch.remove(toRemove);
++  }
++
++  const operation = patch.set(toSet);
++  return toRemove.length > 0 ? operation.remove(toRemove) : operation;
++}
+diff --git a/packages/data/src/repository/practice-repository.ts b/packages/data/src/repository/practice-repository.ts
+index 1d6acab5..cf49a4d6 100644
+--- a/packages/data/src/repository/practice-repository.ts
++++ b/packages/data/src/repository/practice-repository.ts
+@@ -1,9 +1,43 @@
+ import type { EntityItem } from "electrodb";
++import { ConflictError } from "../errors";
+ import type { Practice } from "../model";
+ import { PracticeEntity } from "../model";
+-import type { IPracticeRepository } from "./types";
++import { buildPatchOperation, splitPatchFields } from "./patch-fields";
++import type { CreatePracticeInput, IPracticeRepository, PatchPracticeFields } from "./types";
+ 
+ export class PracticeRepository implements IPracticeRepository {
++  async createPractice(practice: CreatePracticeInput): Promise<Practice> {
++    const result = await PracticeEntity.create(practice).go({
++      returnOnConditionCheckFailure: true,
++    });
++
++    if (result.rejected) {
++      throw new ConflictError(`Practice ${practice.id} already exists`);
++    }
++
++    return this.practiceFromEntityItem(result.data);
++  }
++
++  async patchPractice(id: string, fields: PatchPracticeFields): Promise<Practice | null> {
++    const { toSet, toRemove } = splitPatchFields(fields);
++
++    if (Object.keys(toSet).length === 0 && toRemove.length === 0) {
++      return this.getPractice(id);
++    }
++
++    const operation = buildPatchOperation(PracticeEntity.patch({ id }), toSet, toRemove);
++
++    const result = await operation.go({
++      returnOnConditionCheckFailure: true,
++      response: "all_new",
++    });
++    if (result.rejected) {
++      return null;
++    }
++
++    return this.practiceFromEntityItem(result.data);
++  }
++
+   async upsertPractice(practice: Omit<Practice, "createdAt" | "updatedAt">): Promise<Practice> {
+     await PracticeEntity.upsert({
+       id: practice.id,
+diff --git a/packages/data/src/repository/referral-repository.ts b/packages/data/src/repository/referral-repository.ts
+index 20ddb01d..b531be7f 100644
+--- a/packages/data/src/repository/referral-repository.ts
++++ b/packages/data/src/repository/referral-repository.ts
+@@ -1,7 +1,9 @@
+ import type { EntityItem } from "electrodb";
++import { ConflictError } from "../errors";
+ import type { PracticeStats, Referral } from "../model";
+ import { ReferralEntity } from "../model";
+-import type { IReferralRepository } from "./types";
++import { buildPatchOperation, splitPatchFields } from "./patch-fields";
++import type { CreateReferralInput, IReferralRepository, PatchReferralFields } from "./types";
+ 
+ const OPTIONAL_FIELDS = [
+   "mobile",
+@@ -53,6 +55,38 @@ export class ReferralRepository implements IReferralRepository {
+     return (await this.getReferral(referral.id))!;
+   }
+ 
++  async createReferral(referral: CreateReferralInput): Promise<Referral> {
++    const result = await ReferralEntity.create(referral).go({
++      returnOnConditionCheckFailure: true,
++    });
++
++    if (result.rejected) {
++      throw new ConflictError(`Referral ${referral.id} already exists`);
++    }
++
++    return this.referralFromEntityItem(result.data);
++  }
++
++  async patchReferral(id: string, fields: PatchReferralFields): Promise<Referral | null> {
++    const { toSet, toRemove } = splitPatchFields(fields);
++
++    if (Object.keys(toSet).length === 0 && toRemove.length === 0) {
++      return this.getReferral(id);
++    }
++
++    const operation = buildPatchOperation(ReferralEntity.patch({ id }), toSet, toRemove);
++
++    const result = await operation.go({
++      returnOnConditionCheckFailure: true,
++      response: "all_new",
++    });
++    if (result.rejected) {
++      return null;
++    }
++
++    return this.referralFromEntityItem(result.data);
++  }
++
+   async getReferral(id: string): Promise<Referral | null> {
+     const response = await ReferralEntity.get({ id }).go();
+     if (!response.data) {
+diff --git a/packages/data/src/repository/types.ts b/packages/data/src/repository/types.ts
+index 796ba8da..c3722948 100644
+--- a/packages/data/src/repository/types.ts
++++ b/packages/data/src/repository/types.ts
+@@ -1,14 +1,57 @@
+ import type {
+   AuditPayload,
++  PatchFields,
+   PdfRef,
+   Practice,
++  PracticeEntity,
+   PracticeReportPublished,
+   PracticeStats,
+   PublishStatus,
+   Referral,
++  ReferralEntity,
++  RemovableKeys,
+   ReportType,
++  UpsertFields,
+ } from "../model";
+ 
++type AutoSetTimestamps = "createdAt" | "updatedAt";
++
++export type CreatePracticeInput = UpsertFields<Practice, typeof PracticeEntity, AutoSetTimestamps>;
++export type CreateReferralInput = UpsertFields<Referral, typeof ReferralEntity, AutoSetTimestamps>;
++
++export type PatchPracticeFields = NullableRemovable<
++  Omit<PatchFields<Practice, typeof PracticeEntity, AutoSetTimestamps>, "id">,
++  RemovableKeys<typeof PracticeEntity>
++>;
++export type PatchReferralFields = NullableRemovable<
++  Omit<PatchFields<Referral, typeof ReferralEntity, AutoSetTimestamps>, "id">,
++  RemovableKeys<typeof ReferralEntity>
++>;
++
++type NullableRemovable<T, Removable extends string> = {
++  [K in keyof T]?: K extends Removable ? T[K] | null : T[K];
++};
++
++type Assert<T extends true> = T;
++type AcceptsNull<T, K extends keyof T> = null extends T[K] ? true : false;
++
++type _RequiredPracticeFieldsRejectNull = Assert<
++  AcceptsNull<PatchPracticeFields, "name"> extends false
++    ? AcceptsNull<PatchPracticeFields, "status"> extends false
++      ? true
++      : false
++    : false
++>;
++type _OptionalPracticeFieldsAcceptNull = Assert<AcceptsNull<PatchPracticeFields, "accountManager">>;
++type _RequiredReferralFieldsRejectNull = Assert<
++  AcceptsNull<PatchReferralFields, "fullName"> extends false
++    ? AcceptsNull<PatchReferralFields, "practiceName"> extends false
++      ? true
++      : false
++    : false
++>;
++type _OptionalReferralFieldsAcceptNull = Assert<AcceptsNull<PatchReferralFields, "mobile">>;
++
+ export interface WritePublishedRowInput {
+   practiceId: string;
+   sfAccountId: string;
+@@ -32,6 +75,8 @@ export interface IPracticeReportPublishedRepository {
+ 
+ export interface IPracticeRepository {
+   upsertPractice(practice: Omit<Practice, "createdAt" | "updatedAt">): Promise<Practice>;
++  createPractice(practice: CreatePracticeInput): Promise<Practice>;
++  patchPractice(id: string, fields: PatchPracticeFields): Promise<Practice | null>;
+   getPractice(id: string): Promise<Practice | null>;
+   deletePractice(id: string): Promise<boolean>;
+   deleteAllPractices(): Promise<number>;
+@@ -59,6 +104,8 @@ export interface IPracticeRepository {
+ 
+ export interface IReferralRepository {
+   upsertReferral(referral: Omit<Referral, "createdAt" | "updatedAt">): Promise<Referral>;
++  createReferral(referral: CreateReferralInput): Promise<Referral>;
++  patchReferral(id: string, fields: PatchReferralFields): Promise<Referral | null>;
+   getReferral(id: string): Promise<Referral | null>;
+   deleteReferral(id: string): Promise<boolean>;
+   deleteAllReferrals(): Promise<number>;

@@ -1,0 +1,1539 @@
+diff --git a/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+index 24535db8..78fb860a 100644
+--- a/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
++++ b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+@@ -41,9 +41,9 @@ describe("internal auth matrix", () => {
+ 
+     for (const [path, methods] of Object.entries(spec.paths ?? {})) {
+       for (const [method, operation] of Object.entries(methods)) {
+-        if (!HTTP_METHODS.has(method)) {
+-          continue;
+-        }
++        // A path item may carry a shared `parameters` array alongside its operations.
++        if (!HTTP_METHODS.has(method)) continue;
++
+         const security = operation.security ?? specWideSecurity;
+         const target = { method: method.toUpperCase(), url: path };
+         if (security.length === 0) {
+@@ -59,12 +59,20 @@ describe("internal auth matrix", () => {
+   });
+ 
+   test("discovers the internal surface from the spec", () => {
+-    expect(authenticated.map((o) => `${o.method} ${o.url}`)).toEqual(
+-      expect.arrayContaining(["DELETE /internal/pcp-referrals", "DELETE /internal/practices"]),
+-    );
+-    expect(preflight.map((o) => `${o.method} ${o.url}`)).toEqual(
+-      expect.arrayContaining(["OPTIONS /internal/pcp-referrals", "OPTIONS /internal/practices"]),
+-    );
++    expect(authenticated.map((o) => `${o.method} ${o.url}`).sort()).toEqual([
++      "DELETE /internal/pcp-referrals",
++      "DELETE /internal/practices",
++      "DELETE /internal/practices/{practiceId}",
++      "GET /internal/practices",
++      "GET /internal/practices/{practiceId}",
++      "PATCH /internal/practices/{practiceId}",
++      "POST /internal/practices",
++    ]);
++    expect(preflight.map((o) => `${o.method} ${o.url}`).sort()).toEqual([
++      "OPTIONS /internal/pcp-referrals",
++      "OPTIONS /internal/practices",
++      "OPTIONS /internal/practices/{practiceId}",
++    ]);
+   });
+ 
+   test("every authenticated operation rejects a missing Authorization header with 401", async () => {
+@@ -117,6 +125,18 @@ describe("internal auth matrix", () => {
+     }
+   });
+ 
++  test("the declared x-api-key header alone does not authenticate — the scheme is bearer", async () => {
++    for (const { method, url } of authenticated) {
++      const res = await serverHelper.getServer().inject({
++        method,
++        url,
++        headers: { "x-api-key": "valid-test-key" },
++      });
++
++      expect(res.statusCode, `${method} ${url}`).toBe(401);
++    }
++  });
++
+   test("every authenticated operation accepts a valid Bearer key", async () => {
+     for (const { method, url } of authenticated) {
+       const res = await serverHelper.getServer().inject({
+diff --git a/apps/api/src/__tests__/routes/internal-practices-crud.test.ts b/apps/api/src/__tests__/routes/internal-practices-crud.test.ts
+new file mode 100644
+index 00000000..8a5d8977
+--- /dev/null
++++ b/apps/api/src/__tests__/routes/internal-practices-crud.test.ts
+@@ -0,0 +1,315 @@
++import { clearAllItems, practiceRepository } from "@attribution-service/data";
++import { afterEach, describe, expect, test, vi } from "vitest";
++import { useServerHelper } from "../util";
++
++vi.mock("../../config");
++
++const AUTH_HEADER = { authorization: "Bearer valid-test-key" };
++
++const BASE_BODY = {
++  id: "ACCT-001",
++  name: "Smith Family Practice",
++  status: "SOLD" as const,
++  accountManager: "Jordan Lee",
++  practiceEmail: "front-desk@smith.example",
++};
++
++describe("internal practices CRUD", () => {
++  const serverHelper = useServerHelper();
++
++  afterEach(async () => {
++    await clearAllItems();
++  });
++
++  const post = (payload: unknown) =>
++    serverHelper.getServer().inject({
++      method: "POST",
++      url: "/internal/practices",
++      headers: AUTH_HEADER,
++      payload,
++    });
++
++  const get = (url: string) =>
++    serverHelper.getServer().inject({ method: "GET", url, headers: AUTH_HEADER });
++
++  const patch = (id: string, payload: unknown) =>
++    serverHelper.getServer().inject({
++      method: "PATCH",
++      url: `/internal/practices/${id}`,
++      headers: AUTH_HEADER,
++      payload,
++    });
++
++  const del = (url: string) =>
++    serverHelper.getServer().inject({ method: "DELETE", url, headers: AUTH_HEADER });
++
++  describe("POST /internal/practices", () => {
++    test("valid body returns 201 with the stored record and server timestamps", async () => {
++      const res = await post(BASE_BODY);
++
++      expect(res.statusCode).toBe(201);
++      expect(res.json()).toMatchObject(BASE_BODY);
++      expect(typeof res.json().createdAt).toBe("string");
++      expect(typeof res.json().updatedAt).toBe("string");
++    });
++
++    test("duplicate id returns 409 ConflictError and leaves the record unmodified", async () => {
++      await post(BASE_BODY);
++
++      const res = await post({ ...BASE_BODY, name: "Impostor Practice" });
++
++      expect(res.statusCode).toBe(409);
++      expect(res.json()).toMatchObject({ errorType: "ConflictError" });
++
++      const stored = await get("/internal/practices/ACCT-001");
++      expect(stored.json().name).toBe("Smith Family Practice");
++    });
++
++    test("missing name returns 422", async () => {
++      const { name, ...withoutName } = BASE_BODY;
++
++      const res = await post(withoutName);
++
++      expect(res.statusCode).toBe(422);
++      expect(res.json()).toMatchObject({ errorType: "UnprocessableContentError" });
++    });
++
++    test("status outside the enum returns 422", async () => {
++      const res = await post({ ...BASE_BODY, status: "NOT_A_STATUS" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("supplying server-managed createdAt returns 422", async () => {
++      const res = await post({ ...BASE_BODY, createdAt: "2020-01-01T00:00:00.000Z" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("non-email practiceEmail returns 422", async () => {
++      const res = await post({ ...BASE_BODY, practiceEmail: "n/a" });
++
++      expect(res.statusCode).toBe(422);
++      expect(res.json()).toMatchObject({ errorType: "UnprocessableContentError" });
++    });
++
++    test("omitted optional fields are absent on read, not null", async () => {
++      await post({ id: "p-minimal", name: "Minimal", status: "SOLD" });
++
++      const body = (await get("/internal/practices/p-minimal")).json();
++
++      expect(body).not.toHaveProperty("accountManager");
++      expect(body).not.toHaveProperty("practiceEmail");
++      expect(body).not.toHaveProperty("lastReferralDate");
++    });
++  });
++
++  describe("GET /internal/practices/{practiceId}", () => {
++    test("existing id returns 200 with every stored attribute", async () => {
++      await post({ ...BASE_BODY, lastReferralDate: "2026-05-15" });
++
++      const res = await get("/internal/practices/ACCT-001");
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).toMatchObject({
++        ...BASE_BODY,
++        lastReferralDate: "2026-05-15",
++      });
++    });
++
++    test("unknown id returns 404 NotFoundError", async () => {
++      const res = await get("/internal/practices/does-not-exist");
++
++      expect(res.statusCode).toBe(404);
++      expect(res.json()).toMatchObject({ errorType: "NotFoundError" });
++    });
++  });
++
++  describe("GET /internal/practices", () => {
++    test("no filter returns a page of practices", async () => {
++      await post(BASE_BODY);
++      await post({ id: "ACCT-002", name: "Jones Practice", status: "CHURNED" });
++
++      const res = await get("/internal/practices");
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json().practices).toHaveLength(2);
++    });
++
++    test("filters by name, status, and accountManager", async () => {
++      await post(BASE_BODY);
++      await post({
++        id: "ACCT-002",
++        name: "Jones Practice",
++        status: "CHURNED",
++        accountManager: "Casey Kim",
++      });
++
++      const byName = await get("/internal/practices?name=Jones%20Practice");
++      expect(byName.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-002"]);
++
++      const byStatus = await get("/internal/practices?status=SOLD");
++      expect(byStatus.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-001"]);
++
++      const byAm = await get("/internal/practices?accountManager=Casey%20Kim");
++      expect(byAm.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-002"]);
++    });
++
++    test("name lookup is case-insensitive because the GSI2 key is upper-cased", async () => {
++      await post(BASE_BODY);
++
++      const res = await get("/internal/practices?name=smith%20family%20practice");
++
++      expect(res.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-001"]);
++    });
++
++    test("accountManager lookup is case-insensitive", async () => {
++      await post(BASE_BODY);
++
++      const res = await get("/internal/practices?accountManager=jordan%20lee");
++
++      expect(res.json().practices.map((p: { id: string }) => p.id)).toEqual(["ACCT-001"]);
++    });
++
++    test("limit outside 1-100 returns 422", async () => {
++      expect((await get("/internal/practices?limit=0")).statusCode).toBe(422);
++      expect((await get("/internal/practices?limit=101")).statusCode).toBe(422);
++    });
++
++    test("supplying more than one filter returns 422 rather than silently dropping filters", async () => {
++      const res = await get("/internal/practices?name=Jones%20Practice&status=CHURNED");
++
++      expect(res.statusCode).toBe(422);
++      expect(res.json()).toMatchObject({ errorType: "UnprocessableContentError" });
++    });
++
++    test("cursor replay returns the next page without repeats or gaps", async () => {
++      for (const id of ["p1", "p2", "p3"]) {
++        await post({ id, name: `Practice ${id}`, status: "SOLD" });
++      }
++
++      const first = await get("/internal/practices?limit=2");
++      expect(first.json().practices).toHaveLength(2);
++      expect(first.json().nextCursor).toBeDefined();
++
++      const cursor = encodeURIComponent(first.json().nextCursor);
++      const second = await get(`/internal/practices?limit=2&cursor=${cursor}`);
++
++      const firstIds = first.json().practices.map((p: { id: string }) => p.id);
++      const secondIds = second.json().practices.map((p: { id: string }) => p.id);
++
++      expect(secondIds).not.toEqual(expect.arrayContaining(firstIds));
++      expect([...firstIds, ...secondIds].sort()).toEqual(["p1", "p2", "p3"]);
++    });
++  });
++
++  describe("PATCH /internal/practices/{practiceId}", () => {
++    test("partial body returns 200 and preserves untouched fields", async () => {
++      await post({ ...BASE_BODY, lastReferralDate: "2026-05-15" });
++
++      const res = await patch("ACCT-001", { status: "CHURNED" });
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).toMatchObject({
++        id: "ACCT-001",
++        name: "Smith Family Practice",
++        status: "CHURNED",
++        accountManager: "Jordan Lee",
++        practiceEmail: "front-desk@smith.example",
++        lastReferralDate: "2026-05-15",
++      });
++    });
++
++    test("unknown id returns 404 and does not create the record", async () => {
++      const res = await patch("does-not-exist", { name: "Ghost" });
++
++      expect(res.statusCode).toBe(404);
++      expect(await practiceRepository.getPractice("does-not-exist")).toBeNull();
++    });
++
++    test("body containing id returns 422 — id is immutable", async () => {
++      await post(BASE_BODY);
++
++      const res = await patch("ACCT-001", { id: "ACCT-999", name: "Renamed" });
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("null clears an optional field so it is absent on re-read", async () => {
++      await post(BASE_BODY);
++
++      const res = await patch("ACCT-001", { practiceEmail: null });
++
++      expect(res.statusCode).toBe(200);
++      expect(res.json()).not.toHaveProperty("practiceEmail");
++      expect((await get("/internal/practices/ACCT-001")).json()).not.toHaveProperty(
++        "practiceEmail",
++      );
++    });
++
++    test("clearing accountManager removes it from the account-manager lookup", async () => {
++      await post(BASE_BODY);
++
++      await patch("ACCT-001", { accountManager: null });
++
++      const res = await get("/internal/practices?accountManager=Jordan%20Lee");
++      expect(res.json().practices).toEqual([]);
++    });
++
++    test("empty body returns 422 rather than issuing a no-op write", async () => {
++      await post(BASE_BODY);
++
++      const res = await patch("ACCT-001", {});
++
++      expect(res.statusCode).toBe(422);
++    });
++
++    test("advances updatedAt and leaves createdAt unchanged", async () => {
++      const created = (await post(BASE_BODY)).json();
++      await new Promise((resolve) => setTimeout(resolve, 25));
++
++      const patched = (await patch("ACCT-001", { name: "Renamed" })).json();
++
++      expect(patched.createdAt).toBe(created.createdAt);
++      expect(new Date(patched.updatedAt).getTime()).toBeGreaterThan(
++        new Date(created.updatedAt).getTime(),
++      );
++    });
++  });
++
++  describe("DELETE /internal/practices/{practiceId}", () => {
++    test("existing id returns 204 and removes the record", async () => {
++      await post(BASE_BODY);
++
++      const res = await del("/internal/practices/ACCT-001");
++
++      expect(res.statusCode).toBe(204);
++      expect((await get("/internal/practices/ACCT-001")).statusCode).toBe(404);
++    });
++
++    test("unknown id returns 404", async () => {
++      const res = await del("/internal/practices/does-not-exist");
++
++      expect(res.statusCode).toBe(404);
++    });
++
++    test("deleting one practice leaves the others intact", async () => {
++      await post(BASE_BODY);
++      await post({ id: "ACCT-002", name: "Jones Practice", status: "SOLD" });
++
++      await del("/internal/practices/ACCT-001");
++
++      expect((await get("/internal/practices/ACCT-002")).statusCode).toBe(200);
++    });
++
++    test("delete-all keeps its existing 204 behavior", async () => {
++      await post(BASE_BODY);
++      await post({ id: "ACCT-002", name: "Jones Practice", status: "SOLD" });
++
++      const res = await del("/internal/practices");
++
++      expect(res.statusCode).toBe(204);
++      expect((await get("/internal/practices")).json().practices).toEqual([]);
++    });
++  });
++});
+diff --git a/apps/api/src/__tests__/routes/internal-spec-contract.test.ts b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+index 6db58fd3..bbba256d 100644
+--- a/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
++++ b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+@@ -8,7 +8,10 @@ type ServedSpec = {
+   servers?: { url: string; description?: string; "x-internal"?: boolean }[];
+   paths?: Record<string, Record<string, { operationId?: string }>>;
+   components?: {
+-    securitySchemes?: Record<string, { type?: string; scheme?: string }>;
++    securitySchemes?: Record<
++      string,
++      { type?: string; scheme?: string; in?: string; name?: string }
++    >;
+   };
+ };
+ 
+@@ -30,6 +33,15 @@ describe("internal spec contract", () => {
+     });
+   });
+ 
++  test("does not declare apiKeyAuth as an x-api-key header scheme", async () => {
++    const spec = await fetchInternalSpec(serverHelper.getServer());
++    const scheme = spec.components?.securitySchemes?.apiKeyAuth;
++
++    expect(scheme?.type).not.toBe("apiKey");
++    expect(scheme?.in).toBeUndefined();
++    expect(scheme?.name).toBeUndefined();
++  });
++
+   test("lists the prod-int server, flagged internal", async () => {
+     const spec = await fetchInternalSpec(serverHelper.getServer());
+ 
+@@ -49,10 +61,16 @@ describe("internal spec contract", () => {
+       .sort();
+ 
+     expect(operationIds).toEqual([
++      "createPractice",
+       "deleteAllPcpReferrals",
+       "deleteAllPractices",
++      "deletePractice",
++      "getInternalPractice",
++      "listInternalPractices",
+       "optionsInternalPcpReferrals",
+       "optionsInternalPractices",
++      "optionsInternalPracticesPracticeId",
++      "updatePractice",
+     ]);
+   });
+ });
+diff --git a/apps/api/src/errors.ts b/apps/api/src/errors.ts
+index 7f5b1dda..940b6639 100644
+--- a/apps/api/src/errors.ts
++++ b/apps/api/src/errors.ts
+@@ -24,8 +24,10 @@
+  */
+ 
+ import type { FastifySchemaValidationError } from "fastify/types/schema";
++import type { components as internalComponents } from "./generated/internal-types";
+ import type { components } from "./generated/types";
+ 
++type ConflictErrorSchema = internalComponents["schemas"]["ConflictError"];
+ type BadRequestErrorSchema = components["schemas"]["BadRequestError"];
+ type AuthenticationErrorSchema = components["schemas"]["AuthenticationError"];
+ type ForbiddenErrorSchema = components["schemas"]["ForbiddenError"];
+@@ -121,6 +123,21 @@ export class NotFoundError extends ResponseError implements NotFoundErrorSchema
+   }
+ }
+ 
++/**
++ * Conflict error (409) - The resource already exists
++ *
++ * Declared by the internal spec only, so it is typed against
++ * internal-types.ts rather than the public generated types.
++ */
++export class ConflictError extends ResponseError implements ConflictErrorSchema {
++  declare readonly errorType: "ConflictError";
++
++  constructor(message = "Conflict") {
++    super(message, 409);
++    this.errorType = "ConflictError";
++  }
++}
++
+ /**
+  * Content Issue - Represents a single validation error
+  *
+diff --git a/apps/api/src/generated/internal-route-handler-types.ts b/apps/api/src/generated/internal-route-handler-types.ts
+index 8335782c..0a299233 100644
+--- a/apps/api/src/generated/internal-route-handler-types.ts
++++ b/apps/api/src/generated/internal-route-handler-types.ts
+@@ -36,5 +36,11 @@ export type RouteHandler<T extends keyof operations> = RouteHandlerMethod<
+ 
+ export type DeleteAllPcpReferralsRouteHandler = RouteHandler<'deleteAllPcpReferrals'>
+ export type OptionsInternalPcpReferralsRouteHandler = RouteHandler<'optionsInternalPcpReferrals'>
++export type ListInternalPracticesRouteHandler = RouteHandler<'listInternalPractices'>
++export type CreatePracticeRouteHandler = RouteHandler<'createPractice'>
+ export type DeleteAllPracticesRouteHandler = RouteHandler<'deleteAllPractices'>
+ export type OptionsInternalPracticesRouteHandler = RouteHandler<'optionsInternalPractices'>
++export type GetInternalPracticeRouteHandler = RouteHandler<'getInternalPractice'>
++export type DeletePracticeRouteHandler = RouteHandler<'deletePractice'>
++export type OptionsInternalPracticesPracticeIdRouteHandler = RouteHandler<'optionsInternalPracticesPracticeId'>
++export type UpdatePracticeRouteHandler = RouteHandler<'updatePractice'>
+diff --git a/apps/api/src/generated/internal-types.ts b/apps/api/src/generated/internal-types.ts
+index 68726e5b..72ace0fb 100644
+--- a/apps/api/src/generated/internal-types.ts
++++ b/apps/api/src/generated/internal-types.ts
+@@ -35,9 +35,17 @@ export interface paths {
+             path?: never;
+             cookie?: never;
+         };
+-        get?: never;
++        /**
++         * List practice records
++         * @description Returns a page of stored practice records. Supplying exactly one of name, status, or accountManager serves the page from the matching GSI; supplying none scans the table. Supplying more than one is rejected with a 422. Name and accountManager lookups are case-insensitive because those index keys are upper-cased.
++         */
++        get: operations["listInternalPractices"];
+         put?: never;
+-        post?: never;
++        /**
++         * Create a practice record
++         * @description Creates a practice with a caller-supplied id. Rejects with 409 if a practice with that id already exists rather than overwriting it, which is the difference between this operation and the Hex ingest upsert.
++         */
++        post: operations["createPractice"];
+         /**
+          * Delete all practice records
+          * @description Wipes all practice records from the table. Intended for dev tooling — guarded by apiKeyAuth and not reachable via Kong (internal spec only).
+@@ -52,6 +60,41 @@ export interface paths {
+         patch?: never;
+         trace?: never;
+     };
++    "/internal/practices/{practiceId}": {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        /**
++         * Get a practice record
++         * @description Returns the full stored state of one practice. Optional attributes that are absent are omitted rather than returned as null.
++         */
++        get: operations["getInternalPractice"];
++        put?: never;
++        post?: never;
++        /**
++         * Delete a practice record
++         * @description Deletes one practice, leaving every other record intact.
++         */
++        delete: operations["deletePractice"];
++        /**
++         * CORS preflight
++         * @description Auto-generated preflight operation for Kong routing.
++         */
++        options: operations["optionsInternalPracticesPracticeId"];
++        head?: never;
++        /**
++         * Update a practice record
++         * @description Applies only the supplied fields. Omitting a field leaves the stored value untouched; supplying null for an optional field clears it. Never creates a record — an unknown practiceId is a 404, not an upsert.
++         */
++        patch: operations["updatePractice"];
++        trace?: never;
++    };
+ }
+ export type webhooks = Record<string, never>;
+ export interface components {
+@@ -73,6 +116,97 @@ export interface components {
+             /** @description Error message */
+             message: string;
+         });
++        NotFoundError: {
++            errorType: "NotFoundError";
++        } & (Omit<components["schemas"]["ResponseError"], "errorType"> & {
++            errorType: string;
++            message: string;
++        });
++        ConflictError: {
++            errorType: "ConflictError";
++        } & (Omit<components["schemas"]["ResponseError"], "errorType"> & {
++            errorType: string;
++            message: string;
++        });
++        UnprocessableContentError: {
++            errorType: "UnprocessableContentError";
++        } & (Omit<components["schemas"]["ResponseError"], "errorType"> & {
++            errorType: string;
++            message: string;
++            issues: components["schemas"]["ContentIssue"][];
++        });
++        ContentIssue: {
++            /** @description Path to the field that failed validation */
++            instancePath: string;
++            /** @description Validation error code */
++            code: string;
++            /** @description Human-readable error message */
++            message: string;
++            /** @description Additional parameters related to the validation error */
++            params?: {
++                [key: string]: unknown;
++            };
++        };
++        /**
++         * @description Engagement status of the practice.
++         * @enum {string}
++         */
++        PracticeStatus: "SOLD" | "ONBOARDING" | "STALLED_IN_ONBOARDING" | "CHURNED" | "OTHER";
++        /** @description The full stored state of a practice. Optional attributes are omitted when absent rather than returned as null. */
++        InternalPractice: {
++            /** @description Salesforce account id (upstream primary key). */
++            id: string;
++            /** @description Practice name. */
++            name: string;
++            status: components["schemas"]["PracticeStatus"];
++            /** @description Name of the account manager assigned to this practice. */
++            accountManager?: string;
++            /** @description Contact email used by the monthly batch report send. */
++            practiceEmail?: string;
++            /**
++             * Format: date
++             * @description Date of the most recent referral (YYYY-MM-DD).
++             */
++            lastReferralDate?: string;
++            /**
++             * Format: date-time
++             * @description Server-assigned creation timestamp.
++             */
++            createdAt: string;
++            /**
++             * Format: date-time
++             * @description Server-assigned last-modified timestamp.
++             */
++            updatedAt: string;
++        };
++        InternalPracticeListResponse: {
++            practices: components["schemas"]["InternalPractice"][];
++            /** @description Present when more results remain; replay it to fetch the next page. */
++            nextCursor?: string;
++        };
++        /** @description createdAt and updatedAt are server-managed and rejected if supplied. */
++        CreateInternalPracticeRequest: {
++            /** @description Salesforce account id (upstream primary key). */
++            id: string;
++            /** @description Practice name. */
++            name: string;
++            status: components["schemas"]["PracticeStatus"];
++            accountManager?: string;
++            /** Format: email */
++            practiceEmail?: string;
++            /** Format: date */
++            lastReferralDate?: string;
++        };
++        /** @description Supply only the fields to change. Omitting a field leaves the stored value untouched; null clears an optional field. id is the primary key and cannot be changed, so it is rejected here. */
++        UpdateInternalPracticeRequest: {
++            name?: string;
++            status?: components["schemas"]["PracticeStatus"];
++            accountManager?: string | null;
++            /** Format: email */
++            practiceEmail?: string | null;
++            /** Format: date */
++            lastReferralDate?: string | null;
++        };
+     };
+     responses: {
+         /** @description Unauthorized - Authentication credentials are missing or invalid */
+@@ -93,6 +227,33 @@ export interface components {
+                 "application/json": components["schemas"]["InternalServerError"];
+             };
+         };
++        /** @description Not Found - The requested resource does not exist */
++        NotFoundErrorResponse: {
++            headers: {
++                [name: string]: unknown;
++            };
++            content: {
++                "application/json": components["schemas"]["NotFoundError"];
++            };
++        };
++        /** @description Conflict - The resource already exists */
++        ConflictErrorResponse: {
++            headers: {
++                [name: string]: unknown;
++            };
++            content: {
++                "application/json": components["schemas"]["ConflictError"];
++            };
++        };
++        /** @description Unprocessable Content - The request contains validation errors */
++        UnprocessableContentErrorResponse: {
++            headers: {
++                [name: string]: unknown;
++            };
++            content: {
++                "application/json": components["schemas"]["UnprocessableContentError"];
++            };
++        };
+     };
+     parameters: never;
+     requestBodies: never;
+@@ -139,6 +300,68 @@ export interface operations {
+             };
+         };
+     };
++    listInternalPractices: {
++        parameters: {
++            query?: {
++                /** @description Exact practice name to look up (case-insensitive). */
++                name?: string;
++                /** @description Practice status to filter by. */
++                status?: components["schemas"]["PracticeStatus"];
++                /** @description Account manager name to look up (case-insensitive). */
++                accountManager?: string;
++                /** @description Maximum number of records to return. */
++                limit?: number;
++                /** @description Opaque pagination cursor returned by a previous call. */
++                cursor?: string;
++            };
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description A page of practice records. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPracticeListResponse"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    createPractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": components["schemas"]["CreateInternalPracticeRequest"];
++            };
++        };
++        responses: {
++            /** @description Practice created. */
++            201: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPractice"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            409: components["responses"]["ConflictErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
+     deleteAllPractices: {
+         parameters: {
+             query?: never;
+@@ -177,4 +400,107 @@ export interface operations {
+             };
+         };
+     };
++    getInternalPractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description The practice record. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPractice"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    deletePractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description Practice deleted. */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    optionsInternalPracticesPracticeId: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description No Content */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    updatePractice: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                /** @description Salesforce account id of the practice. */
++                practiceId: string;
++            };
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": components["schemas"]["UpdateInternalPracticeRequest"];
++            };
++        };
++        responses: {
++            /** @description The updated practice record. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["InternalPractice"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            404: components["responses"]["NotFoundErrorResponse"];
++            422: components["responses"]["UnprocessableContentErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
+ }
+diff --git a/apps/api/src/routes/internal/practices.ts b/apps/api/src/routes/internal/practices.ts
+index df2665db..1f1281bd 100644
+--- a/apps/api/src/routes/internal/practices.ts
++++ b/apps/api/src/routes/internal/practices.ts
+@@ -1,8 +1,16 @@
+ import { logger } from "../../components";
++import { NotFoundError } from "../../errors";
+ import type {
++  CreatePracticeRouteHandler,
+   DeleteAllPracticesRouteHandler,
++  DeletePracticeRouteHandler,
++  GetInternalPracticeRouteHandler,
++  ListInternalPracticesRouteHandler,
++  OptionsInternalPracticesPracticeIdRouteHandler,
+   OptionsInternalPracticesRouteHandler,
++  UpdatePracticeRouteHandler,
+ } from "../../generated/internal-route-handler-types";
++import * as internalPracticeService from "../../service/internal-practice-service";
+ import * as practiceService from "../../service/practice-service";
+ 
+ export const deleteAllPractices: DeleteAllPracticesRouteHandler = async (_request, reply) => {
+@@ -11,9 +19,59 @@ export const deleteAllPractices: DeleteAllPracticesRouteHandler = async (_reques
+   reply.code(204).send();
+ };
+ 
++export const listInternalPractices: ListInternalPracticesRouteHandler = async (request) => {
++  const { name, status, accountManager, limit, cursor } = request.query ?? {};
++
++  return internalPracticeService.listPractices({
++    ...(name !== undefined && { name }),
++    ...(status !== undefined && { status }),
++    ...(accountManager !== undefined && { accountManager }),
++    ...(limit !== undefined && { limit }),
++    ...(cursor !== undefined && { cursor }),
++  });
++};
++
++export const createPractice: CreatePracticeRouteHandler = async (request, reply) => {
++  const created = await internalPracticeService.createPractice(request.body);
++  reply.code(201);
++  return created;
++};
++
++export const getInternalPractice: GetInternalPracticeRouteHandler = async (request) => {
++  const practice = await internalPracticeService.getPractice(request.params.practiceId);
++  if (!practice) {
++    throw new NotFoundError(`Practice ${request.params.practiceId} not found`);
++  }
++  return practice;
++};
++
++export const updatePractice: UpdatePracticeRouteHandler = async (request) => {
++  const updated = await internalPracticeService.updatePractice(
++    request.params.practiceId,
++    request.body,
++  );
++  if (!updated) {
++    throw new NotFoundError(`Practice ${request.params.practiceId} not found`);
++  }
++  return updated;
++};
++
++export const deletePractice: DeletePracticeRouteHandler = async (request, reply) => {
++  const deleted = await internalPracticeService.deletePractice(request.params.practiceId);
++  if (!deleted) {
++    throw new NotFoundError(`Practice ${request.params.practiceId} not found`);
++  }
++  reply.code(204).send();
++};
++
+ export const optionsInternalPractices: OptionsInternalPracticesRouteHandler = async (
+   _request,
+   reply,
+ ) => {
+   reply.code(204).send();
+ };
++
++export const optionsInternalPracticesPracticeId: OptionsInternalPracticesPracticeIdRouteHandler =
++  async (_request, reply) => {
++    reply.code(204).send();
++  };
+diff --git a/apps/api/src/server.ts b/apps/api/src/server.ts
+index 471aacd5..770a8748 100644
+--- a/apps/api/src/server.ts
++++ b/apps/api/src/server.ts
+@@ -50,7 +50,16 @@ export const createServer = (opts?: FastifyServerOptions): FastifyInstance => {
+     loggerInstance: logger as FastifyBaseLogger,
+     ...opts,
+     disableRequestLogging: true, // Use custom logging hooks instead
+-    ajv: { customOptions: { strict: true } }, // Strict JSON schema validation
++    ajv: {
++      customOptions: {
++        strict: true, // Strict JSON schema validation
++        // Fastify defaults to removeAdditional: true, which silently strips unknown
++        // properties. Schemas declaring additionalProperties: false need those
++        // requests rejected instead — an immutable field supplied in a PATCH body
++        // must 422 rather than be quietly dropped.
++        removeAdditional: false,
++      },
++    },
+   });
+ 
+   server.register(logContext.fastifyContext); // Register imported version to share store with logContext
+diff --git a/apps/api/src/service/internal-practice-service.ts b/apps/api/src/service/internal-practice-service.ts
+new file mode 100644
+index 00000000..cb8fad96
+--- /dev/null
++++ b/apps/api/src/service/internal-practice-service.ts
+@@ -0,0 +1,109 @@
++import type { Practice, PracticeStatus } from "@attribution-service/data";
++import { ConflictError as DataConflictError, practiceRepository } from "@attribution-service/data";
++import { ConflictError, ContentIssue, UnprocessableContentError } from "../errors";
++import type { components } from "../generated/internal-types";
++
++type InternalPractice = components["schemas"]["InternalPractice"];
++type CreateRequest = components["schemas"]["CreateInternalPracticeRequest"];
++type UpdateRequest = components["schemas"]["UpdateInternalPracticeRequest"];
++
++export type ListFilters = {
++  name?: string;
++  status?: PracticeStatus;
++  accountManager?: string;
++  limit?: number;
++  cursor?: string;
++};
++
++/**
++ * Absent optional attributes are omitted rather than serialized as null, so a
++ * response mirrors what is actually stored.
++ */
++export function toInternalPractice(practice: Practice): InternalPractice {
++  return {
++    id: practice.id,
++    name: practice.name,
++    status: practice.status,
++    ...(practice.accountManager !== undefined && { accountManager: practice.accountManager }),
++    ...(practice.practiceEmail !== undefined && { practiceEmail: practice.practiceEmail }),
++    ...(practice.lastReferralDate !== undefined && {
++      lastReferralDate: practice.lastReferralDate,
++    }),
++    createdAt: practice.createdAt.toISOString(),
++    updatedAt: practice.updatedAt.toISOString(),
++  };
++}
++
++export async function createPractice(request: CreateRequest): Promise<InternalPractice> {
++  try {
++    const created = await practiceRepository.createPractice(request);
++    return toInternalPractice(created);
++  } catch (error) {
++    if (error instanceof DataConflictError) {
++      throw new ConflictError(error.message);
++    }
++    throw error;
++  }
++}
++
++export async function getPractice(id: string): Promise<InternalPractice | null> {
++  const practice = await practiceRepository.getPractice(id);
++  return practice ? toInternalPractice(practice) : null;
++}
++
++export async function updatePractice(
++  id: string,
++  request: UpdateRequest,
++): Promise<InternalPractice | null> {
++  const patched = await practiceRepository.patchPractice(id, request);
++  return patched ? toInternalPractice(patched) : null;
++}
++
++export async function deletePractice(id: string): Promise<boolean> {
++  return practiceRepository.deletePractice(id);
++}
++
++export async function listPractices(
++  filters: ListFilters = {},
++): Promise<{ practices: InternalPractice[]; nextCursor?: string }> {
++  const page = await fetchPage(filters);
++
++  return {
++    practices: page.practices.map(toInternalPractice),
++    ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
++  };
++}
++
++/**
++ * At most one filter is honoured, in declaration order, so each lookup is served
++ * by its own GSI rather than by a scan-and-filter. Supplying more than one is a
++ * caller error rather than a silently-dropped filter, so it is rejected.
++ */
++function fetchPage(filters: ListFilters) {
++  const { name, status, accountManager, limit, cursor } = filters;
++
++  const active = (["name", "status", "accountManager"] as const).filter(
++    (key) => filters[key] !== undefined,
++  );
++  if (active.length > 1) {
++    throw new UnprocessableContentError("Supply at most one of name, status, or accountManager", [
++      new ContentIssue(
++        "",
++        "oneOf",
++        `Only one filter may be supplied; received ${active.join(", ")}`,
++        { supplied: active },
++      ),
++    ]);
++  }
++
++  if (name !== undefined) {
++    return practiceRepository.listPracticesByName(name, limit, cursor);
++  }
++  if (status !== undefined) {
++    return practiceRepository.listPracticesByStatus(status, limit, cursor);
++  }
++  if (accountManager !== undefined) {
++    return practiceRepository.listPracticesByAccountManager(accountManager, limit, cursor);
++  }
++  return practiceRepository.listPractices(limit, cursor);
++}
+diff --git a/docs/openapi-internal.yaml b/docs/openapi-internal.yaml
+index 1d33758b..2c0e9ea1 100644
+--- a/docs/openapi-internal.yaml
++++ b/docs/openapi-internal.yaml
+@@ -52,6 +52,105 @@ paths:
+           description: No Content
+ 
+   /internal/practices:
++    get:
++      operationId: listInternalPractices
++      summary: List practice records
++      description: >
++        Returns a page of stored practice records. Supplying exactly one of
++        name, status, or accountManager serves the page from the matching GSI;
++        supplying none scans the table. Supplying more than one is rejected with
++        a 422. Name and accountManager lookups are case-insensitive because those
++        index keys are upper-cased.
++      security:
++        - apiKeyAuth: []
++      parameters:
++        - name: name
++          in: query
++          required: false
++          description: Exact practice name to look up (case-insensitive).
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 255
++        - name: status
++          in: query
++          required: false
++          description: Practice status to filter by.
++          schema:
++            $ref: "#/components/schemas/PracticeStatus"
++        - name: accountManager
++          in: query
++          required: false
++          description: Account manager name to look up (case-insensitive).
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 255
++        - name: limit
++          in: query
++          required: false
++          description: Maximum number of records to return.
++          schema:
++            type: integer
++            format: int32
++            minimum: 1
++            maximum: 100
++            default: 25
++        - name: cursor
++          in: query
++          required: false
++          description: Opaque pagination cursor returned by a previous call.
++          schema:
++            type: string
++            minLength: 1
++            maxLength: 4096
++      responses:
++        "200":
++          description: A page of practice records.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPracticeListResponse"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    post:
++      operationId: createPractice
++      summary: Create a practice record
++      description: >
++        Creates a practice with a caller-supplied id. Rejects with 409 if a
++        practice with that id already exists rather than overwriting it, which
++        is the difference between this operation and the Hex ingest upsert.
++      security:
++        - apiKeyAuth: []
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: "#/components/schemas/CreateInternalPracticeRequest"
++      responses:
++        "201":
++          description: Practice created.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPractice"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "409":
++          $ref: "#/components/responses/ConflictErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
+     delete:
+       operationId: deleteAllPractices
+       summary: Delete all practice records
+@@ -78,6 +177,101 @@ paths:
+         "204":
+           description: No Content
+ 
++  /internal/practices/{practiceId}:
++    parameters:
++      - name: practiceId
++        in: path
++        required: true
++        description: Salesforce account id of the practice.
++        schema:
++          type: string
++          minLength: 1
++          maxLength: 100
++    get:
++      operationId: getInternalPractice
++      summary: Get a practice record
++      description: >
++        Returns the full stored state of one practice. Optional attributes that
++        are absent are omitted rather than returned as null.
++      security:
++        - apiKeyAuth: []
++      responses:
++        "200":
++          description: The practice record.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPractice"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    patch:
++      operationId: updatePractice
++      summary: Update a practice record
++      description: >
++        Applies only the supplied fields. Omitting a field leaves the stored
++        value untouched; supplying null for an optional field clears it. Never
++        creates a record — an unknown practiceId is a 404, not an upsert.
++      security:
++        - apiKeyAuth: []
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: "#/components/schemas/UpdateInternalPracticeRequest"
++      responses:
++        "200":
++          description: The updated practice record.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/InternalPractice"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "422":
++          $ref: "#/components/responses/UnprocessableContentErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    delete:
++      operationId: deletePractice
++      summary: Delete a practice record
++      description: Deletes one practice, leaving every other record intact.
++      security:
++        - apiKeyAuth: []
++      responses:
++        "204":
++          description: Practice deleted.
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "404":
++          $ref: "#/components/responses/NotFoundErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++    options:
++      summary: CORS preflight
++      description: Auto-generated preflight operation for Kong routing.
++      operationId: optionsInternalPracticesPracticeId
++      security: []
++      responses:
++        "204":
++          description: No Content
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practices
++
+ components:
+   securitySchemes:
+     apiKeyAuth:
+@@ -103,6 +297,27 @@ components:
+           schema:
+             $ref: "#/components/schemas/InternalServerError"
+ 
++    NotFoundErrorResponse:
++      description: Not Found - The requested resource does not exist
++      content:
++        application/json:
++          schema:
++            $ref: "#/components/schemas/NotFoundError"
++
++    ConflictErrorResponse:
++      description: Conflict - The resource already exists
++      content:
++        application/json:
++          schema:
++            $ref: "#/components/schemas/ConflictError"
++
++    UnprocessableContentErrorResponse:
++      description: Unprocessable Content - The request contains validation errors
++      content:
++        application/json:
++          schema:
++            $ref: "#/components/schemas/UnprocessableContentError"
++
+   schemas:
+     ResponseError:
+       type: object
+@@ -149,3 +364,219 @@ components:
+           required:
+             - errorType
+             - message
++
++    NotFoundError:
++      allOf:
++        - $ref: "#/components/schemas/ResponseError"
++        - type: object
++          properties:
++            errorType:
++              type: string
++              maxLength: 100
++            message:
++              type: string
++              maxLength: 1000
++          required:
++            - errorType
++            - message
++
++    ConflictError:
++      allOf:
++        - $ref: "#/components/schemas/ResponseError"
++        - type: object
++          properties:
++            errorType:
++              type: string
++              maxLength: 100
++            message:
++              type: string
++              maxLength: 1000
++          required:
++            - errorType
++            - message
++
++    UnprocessableContentError:
++      allOf:
++        - $ref: "#/components/schemas/ResponseError"
++        - type: object
++          properties:
++            errorType:
++              type: string
++              maxLength: 100
++            message:
++              type: string
++              maxLength: 1000
++            issues:
++              type: array
++              maxItems: 50
++              items:
++                $ref: "#/components/schemas/ContentIssue"
++          required:
++            - errorType
++            - message
++            - issues
++
++    ContentIssue:
++      type: object
++      properties:
++        instancePath:
++          type: string
++          maxLength: 200
++          description: Path to the field that failed validation
++        code:
++          type: string
++          maxLength: 100
++          description: Validation error code
++        message:
++          type: string
++          maxLength: 500
++          description: Human-readable error message
++        params:
++          type: object
++          additionalProperties: true
++          description: Additional parameters related to the validation error
++      required:
++        - instancePath
++        - code
++        - message
++
++    PracticeStatus:
++      type: string
++      description: Engagement status of the practice.
++      enum:
++        - SOLD
++        - ONBOARDING
++        - STALLED_IN_ONBOARDING
++        - CHURNED
++        - OTHER
++
++    InternalPractice:
++      type: object
++      description: >
++        The full stored state of a practice. Optional attributes are omitted
++        when absent rather than returned as null.
++      properties:
++        id:
++          type: string
++          minLength: 1
++          maxLength: 100
++          description: Salesforce account id (upstream primary key).
++        name:
++          type: string
++          minLength: 1
++          maxLength: 255
++          description: Practice name.
++        status:
++          $ref: "#/components/schemas/PracticeStatus"
++        accountManager:
++          type: string
++          maxLength: 255
++          description: Name of the account manager assigned to this practice.
++        practiceEmail:
++          type: string
++          maxLength: 255
++          description: Contact email used by the monthly batch report send.
++        lastReferralDate:
++          type: string
++          format: date
++          maxLength: 10
++          description: Date of the most recent referral (YYYY-MM-DD).
++        createdAt:
++          type: string
++          format: date-time
++          maxLength: 40
++          description: Server-assigned creation timestamp.
++        updatedAt:
++          type: string
++          format: date-time
++          maxLength: 40
++          description: Server-assigned last-modified timestamp.
++      required:
++        - id
++        - name
++        - status
++        - createdAt
++        - updatedAt
++
++    InternalPracticeListResponse:
++      type: object
++      properties:
++        practices:
++          type: array
++          maxItems: 100
++          items:
++            $ref: "#/components/schemas/InternalPractice"
++        nextCursor:
++          type: string
++          maxLength: 4096
++          description: Present when more results remain; replay it to fetch the next page.
++      required:
++        - practices
++
++    CreateInternalPracticeRequest:
++      type: object
++      additionalProperties: false
++      description: >
++        createdAt and updatedAt are server-managed and rejected if supplied.
++      properties:
++        id:
++          type: string
++          minLength: 1
++          maxLength: 100
++          description: Salesforce account id (upstream primary key).
++        name:
++          type: string
++          minLength: 1
++          maxLength: 255
++          description: Practice name.
++        status:
++          $ref: "#/components/schemas/PracticeStatus"
++        accountManager:
++          type: string
++          minLength: 1
++          maxLength: 255
++        practiceEmail:
++          type: string
++          format: email
++          minLength: 1
++          maxLength: 255
++        lastReferralDate:
++          type: string
++          format: date
++          maxLength: 10
++      required:
++        - id
++        - name
++        - status
++
++    UpdateInternalPracticeRequest:
++      type: object
++      additionalProperties: false
++      minProperties: 1
++      description: >
++        Supply only the fields to change. Omitting a field leaves the stored
++        value untouched; null clears an optional field. id is the primary key
++        and cannot be changed, so it is rejected here.
++      properties:
++        name:
++          type: string
++          minLength: 1
++          maxLength: 255
++        status:
++          $ref: "#/components/schemas/PracticeStatus"
++        accountManager:
++          type: string
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        practiceEmail:
++          type: string
++          format: email
++          minLength: 1
++          maxLength: 255
++          nullable: true
++        lastReferralDate:
++          type: string
++          format: date
++          maxLength: 10
++          nullable: true

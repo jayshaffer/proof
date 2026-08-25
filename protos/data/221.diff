@@ -1,0 +1,3171 @@
+diff --git a/Taskfile.yml b/Taskfile.yml
+index c000e5e1..42cbd755 100644
+--- a/Taskfile.yml
++++ b/Taskfile.yml
+@@ -52,6 +52,45 @@ tasks:
+     cmds:
+       - pnpm -r build
+ 
++  run-dashboard:
++    desc: Start the dev dashboard
++    summary: |
++      Starts the local-only dev dashboard on http://localhost:5174, pointed at
++      this worktree's API port via VITE_API_BASE_URL.
++
++      Requires the API to be running (task run-service) — the dashboard is a
++      browser client and does nothing on its own.
++
++      Sign in with an API key from .secrets.env (API_KEYS) and pick "Local".
++    cmds:
++      - bash scripts-ext/dev-dashboard.sh
++
++  run-local:
++    desc: Start LocalStack, the API, and the dev dashboard together
++    summary: |
++      One-shot local stack:
++        1. task setup-db     — LocalStack + DynamoDB tables (skipped if running)
++        2. task run-service  — API, detached so the dashboard can take the terminal
++        3. task run-dashboard — dashboard in the foreground
++
++      The API runs detached, so use `docker compose -p <project> logs -f` to
++      follow it (task setup-db prints the project name).
++
++      Ctrl-C stops only the dashboard; LocalStack and the API keep running.
++      Use `task stop-local` to bring them down.
++    cmds:
++      - task: setup-db
++      - BACKING=true scripts/server.sh
++      - task: run-dashboard
++
++  stop-local:
++    desc: Stop this worktree's LocalStack and API containers
++    summary: |
++      Brings down the containers started by task run-local / run-service for
++      this worktree only, leaving other worktrees' stacks untouched.
++    cmds:
++      - bash scripts-ext/stop-local.sh
++
+   run-service:
+     desc: Start the API service locally
+     summary: |
+diff --git a/apps/dev-dashboard/README.md b/apps/dev-dashboard/README.md
+index 0456917c..2d5dc63c 100644
+--- a/apps/dev-dashboard/README.md
++++ b/apps/dev-dashboard/README.md
+@@ -17,25 +17,42 @@ laptops. Do not add it to the Dockerfile or Harness pipelines.
+ 
+ ## Running
+ 
++Whole stack (LocalStack + API + dashboard) in one command:
++
++```bash
++task run-local
++```
++
++That runs `setup-db`, starts the API detached, then holds the terminal with
++the dashboard. `task stop-local` brings the containers back down — scoped to
++this worktree, so it leaves other worktrees' stacks alone.
++
++Dashboard on its own, when the API is already up:
++
+ ```bash
+-pnpm --filter @attribution-service/dev-dashboard start
++task run-dashboard
+ ```
+ 
+ The app boots at <http://localhost:5174>. The dev server binds only to
+ the loopback interface, so it is not reachable from other machines on
+ your network.
+ 
++Prefer these tasks over `pnpm --filter … start`. They source
++`scripts-ext/worktree-config.sh`, which exports `VITE_API_BASE_URL` for this
++worktree's API port. Started directly, the dashboard falls back to `:3024` and
++silently talks to whichever worktree owns the default port — or nothing.
++
+ ### Talking to local
+ 
+-Start the API in another terminal:
++Select **Local** in the environment picker. `/readyz` will respond
++without an API key. Everything else needs a key from `API_KEYS` in
++`.secrets.env`.
+ 
+-```bash
+-task run-service
+-# API on http://localhost:3024
+-```
++`.secrets.env` is gitignored, so a fresh worktree does not have one — copy it
++from the main checkout before `task run-local`.
+ 
+-Select **Local** in the environment picker. `/readyz` will respond
+-without an API key.
++In a worktree the API port is computed from the worktree path (3200-3299), not
++3024; `task setup-db` and `task run-local` print the resolved ports.
+ 
+ ### Talking to dev / prod
+ 
+diff --git a/apps/dev-dashboard/package.json b/apps/dev-dashboard/package.json
+index 684931dc..9530d437 100644
+--- a/apps/dev-dashboard/package.json
++++ b/apps/dev-dashboard/package.json
+@@ -12,7 +12,9 @@
+     "lint": "biome check .",
+     "lint-ci": "biome ci --reporter=github .",
+     "lint-fix": "biome check --write .",
+-    "test": "vitest run --passWithNoTests"
++    "test": "vitest run",
++    "test:watch": "vitest watch",
++    "test:coverage": "vitest run --coverage"
+   },
+   "author": "Rula",
+   "license": "ISC",
+@@ -23,9 +25,13 @@
+     "react-dom": "^19.2.8"
+   },
+   "devDependencies": {
++    "@testing-library/jest-dom": "^7.0.0",
++    "@testing-library/react": "^16.3.2",
++    "@testing-library/user-event": "^14.6.1",
+     "@types/react": "^19.1.8",
+     "@types/react-dom": "^19.1.6",
+     "@vitejs/plugin-react": "^6.0.1",
++    "jsdom": "^30.0.1",
+     "vite": "^8.1.4",
+     "vitest": "^4.1.5"
+   },
+diff --git a/apps/dev-dashboard/src/App.tsx b/apps/dev-dashboard/src/App.tsx
+index 4183cb38..15950140 100644
+--- a/apps/dev-dashboard/src/App.tsx
++++ b/apps/dev-dashboard/src/App.tsx
+@@ -2,14 +2,26 @@ import { useState } from "react";
+ import { ApiKeyInput } from "./components/ApiKeyInput";
+ import { EnvironmentPicker } from "./components/EnvironmentPicker";
+ import { EnvironmentProvider } from "./context/EnvironmentContext";
++import { CohortPreview } from "./pages/CohortPreview";
++import { PcpReferrals } from "./pages/PcpReferrals";
+ import { PcpReferralsIngest } from "./pages/PcpReferralsIngest";
+ import { Ping } from "./pages/Ping";
++import { Practices } from "./pages/Practices";
+ import { PracticesIngest } from "./pages/PracticesIngest";
+ 
+-type Page = "ping" | "pcp-referrals-ingest" | "practices-ingest";
++type Page =
++  | "ping"
++  | "pcp-referrals-ingest"
++  | "practices-ingest"
++  | "practices"
++  | "pcp-referrals"
++  | "cohort-preview";
+ 
+ const NAV: Array<{ id: Page; label: string }> = [
+   { id: "ping", label: "Ping" },
++  { id: "practices", label: "Practices" },
++  { id: "pcp-referrals", label: "PCP Referrals" },
++  { id: "cohort-preview", label: "Cohort Preview" },
+   { id: "pcp-referrals-ingest", label: "PCP Referrals Ingest" },
+   { id: "practices-ingest", label: "Practices Ingest" },
+ ];
+@@ -70,6 +82,9 @@ function Dashboard() {
+       </nav>
+ 
+       {page === "ping" && <Ping />}
++      {page === "practices" && <Practices />}
++      {page === "pcp-referrals" && <PcpReferrals />}
++      {page === "cohort-preview" && <CohortPreview />}
+       {page === "pcp-referrals-ingest" && <PcpReferralsIngest />}
+       {page === "practices-ingest" && <PracticesIngest />}
+     </div>
+diff --git a/apps/dev-dashboard/src/api/internal-types.ts b/apps/dev-dashboard/src/api/internal-types.ts
+new file mode 100644
+index 00000000..ff219299
+--- /dev/null
++++ b/apps/dev-dashboard/src/api/internal-types.ts
+@@ -0,0 +1,46 @@
++/**
++ * The dashboard is typed against the generated internal spec types rather than
++ * the axios SDK: clients/attribution-service-client-ts-axios generates from
++ * docs/openapi.yaml only, so it cannot cover /internal operations. Importing
++ * these means an internal spec change breaks `tsc -b` here.
++ */
++import type { components } from "../../../api/src/generated/internal-types";
++
++export type InternalPractice = components["schemas"]["InternalPractice"];
++export type InternalPracticeListResponse = components["schemas"]["InternalPracticeListResponse"];
++export type CreateInternalPracticeRequest = components["schemas"]["CreateInternalPracticeRequest"];
++export type UpdateInternalPracticeRequest = components["schemas"]["UpdateInternalPracticeRequest"];
++
++export type InternalPcpReferral = components["schemas"]["InternalPcpReferral"];
++export type InternalPcpReferralListResponse =
++  components["schemas"]["InternalPcpReferralListResponse"];
++export type CreateInternalPcpReferralRequest =
++  components["schemas"]["CreateInternalPcpReferralRequest"];
++export type UpdateInternalPcpReferralRequest =
++  components["schemas"]["UpdateInternalPcpReferralRequest"];
++
++export type CohortPreviewResponse = components["schemas"]["CohortPreviewResponse"];
++export type CohortPreviewSkip = components["schemas"]["CohortPreviewSkip"];
++export type SkipReason = components["schemas"]["SkipReason"];
++export type PracticeStatus = components["schemas"]["PracticeStatus"];
++export type LeadType = components["schemas"]["LeadType"];
++export type LeadStage = components["schemas"]["LeadStage"];
++
++export const PRACTICE_STATUSES: PracticeStatus[] = [
++  "SOLD",
++  "ONBOARDING",
++  "STALLED_IN_ONBOARDING",
++  "CHURNED",
++  "OTHER",
++];
++
++export const LEAD_TYPES: LeadType[] = ["PSYCH_ONLY", "THERAPY_ONLY", "BOTH"];
++
++export const LEAD_STAGES: LeadStage[] = [
++  "LEAD",
++  "CONTACT",
++  "HOLD",
++  "REGISTERED",
++  "SCHEDULED",
++  "PATIENT",
++];
+diff --git a/apps/dev-dashboard/src/api/internal.ts b/apps/dev-dashboard/src/api/internal.ts
+new file mode 100644
+index 00000000..96a4a19c
+--- /dev/null
++++ b/apps/dev-dashboard/src/api/internal.ts
+@@ -0,0 +1,122 @@
++import { createApiClient } from "./client";
++import type {
++  CohortPreviewResponse,
++  CreateInternalPcpReferralRequest,
++  CreateInternalPracticeRequest,
++  InternalPcpReferral,
++  InternalPcpReferralListResponse,
++  InternalPractice,
++  InternalPracticeListResponse,
++  UpdateInternalPcpReferralRequest,
++  UpdateInternalPracticeRequest,
++} from "./internal-types";
++
++export type ApiResult<T> =
++  | { ok: true; status: number; data: T }
++  | { ok: false; status: number | null; message: string; body?: unknown };
++
++export interface ApiTarget {
++  baseUrl: string;
++  apiKey: string;
++}
++
++type Method = "get" | "post" | "patch" | "delete";
++
++async function request<T>(
++  { baseUrl, apiKey }: ApiTarget,
++  method: Method,
++  url: string,
++  body?: unknown,
++): Promise<ApiResult<T>> {
++  const client = createApiClient(baseUrl, apiKey);
++  try {
++    const res = await client.request({
++      method,
++      url,
++      ...(body !== undefined && { data: body }),
++      validateStatus: () => true,
++    });
++
++    if (res.status >= 200 && res.status < 300) {
++      return { ok: true, status: res.status, data: res.data as T };
++    }
++    return {
++      ok: false,
++      status: res.status,
++      message: messageForStatus(res.status),
++      body: res.data,
++    };
++  } catch (err) {
++    return {
++      ok: false,
++      status: null,
++      message: err instanceof Error ? err.message : String(err),
++    };
++  }
++}
++
++function messageForStatus(status: number): string {
++  if (status === 401) return "Invalid or missing API key.";
++  if (status === 404) return "Not found.";
++  if (status === 409) return "Already exists — pick a different id.";
++  if (status === 422) return "Validation failed — see the response body.";
++  return `Unexpected status ${status}.`;
++}
++
++function query(params: Record<string, string | number | undefined>): string {
++  const search = new URLSearchParams();
++  for (const [key, value] of Object.entries(params)) {
++    if (value !== undefined && value !== "") search.set(key, String(value));
++  }
++  const rendered = search.toString();
++  return rendered ? `?${rendered}` : "";
++}
++
++export const practicesApi = {
++  list: (target: ApiTarget, params: Record<string, string | number | undefined>) =>
++    request<InternalPracticeListResponse>(target, "get", `/internal/practices${query(params)}`),
++  get: (target: ApiTarget, id: string) =>
++    request<InternalPractice>(target, "get", `/internal/practices/${encodeURIComponent(id)}`),
++  create: (target: ApiTarget, body: CreateInternalPracticeRequest) =>
++    request<InternalPractice>(target, "post", "/internal/practices", body),
++  update: (target: ApiTarget, id: string, body: UpdateInternalPracticeRequest) =>
++    request<InternalPractice>(
++      target,
++      "patch",
++      `/internal/practices/${encodeURIComponent(id)}`,
++      body,
++    ),
++  remove: (target: ApiTarget, id: string) =>
++    request<null>(target, "delete", `/internal/practices/${encodeURIComponent(id)}`),
++};
++
++export const referralsApi = {
++  list: (target: ApiTarget, params: Record<string, string | number | undefined>) =>
++    request<InternalPcpReferralListResponse>(
++      target,
++      "get",
++      `/internal/pcp-referrals${query(params)}`,
++    ),
++  get: (target: ApiTarget, id: string) =>
++    request<InternalPcpReferral>(
++      target,
++      "get",
++      `/internal/pcp-referrals/${encodeURIComponent(id)}`,
++    ),
++  create: (target: ApiTarget, body: CreateInternalPcpReferralRequest) =>
++    request<InternalPcpReferral>(target, "post", "/internal/pcp-referrals", body),
++  update: (target: ApiTarget, id: string, body: UpdateInternalPcpReferralRequest) =>
++    request<InternalPcpReferral>(
++      target,
++      "patch",
++      `/internal/pcp-referrals/${encodeURIComponent(id)}`,
++      body,
++    ),
++  remove: (target: ApiTarget, id: string) =>
++    request<null>(target, "delete", `/internal/pcp-referrals/${encodeURIComponent(id)}`),
++};
++
++export const cohortPreviewApi = {
++  get: (target: ApiTarget) =>
++    request<CohortPreviewResponse>(target, "get", "/internal/practice-reports/cohort-preview"),
++};
+diff --git a/apps/dev-dashboard/src/components/ConfirmDialog.tsx b/apps/dev-dashboard/src/components/ConfirmDialog.tsx
+new file mode 100644
+index 00000000..8e13ff26
+--- /dev/null
++++ b/apps/dev-dashboard/src/components/ConfirmDialog.tsx
+@@ -0,0 +1,67 @@
++interface ConfirmDialogProps {
++  title: string;
++  body: string;
++  confirmLabel: string;
++  onConfirm: () => void;
++  onCancel: () => void;
++}
++
++/**
++ * Explicit in-app confirmation rather than window.confirm, so the gate is
++ * assertable in tests and can carry per-operation context.
++ */
++export function ConfirmDialog({
++  title,
++  body,
++  confirmLabel,
++  onConfirm,
++  onCancel,
++}: ConfirmDialogProps) {
++  return (
++    <div
++      role="dialog"
++      aria-modal="true"
++      aria-label={title}
++      style={{
++        border: "1px solid #f87171",
++        borderRadius: "4px",
++        padding: "1rem",
++        background: "rgba(248,113,113,0.08)",
++        display: "flex",
++        flexDirection: "column",
++        gap: "0.75rem",
++      }}
++    >
++      <strong>{title}</strong>
++      <p style={{ margin: 0, fontSize: "0.9rem", opacity: 0.85 }}>{body}</p>
++      <div style={{ display: "flex", gap: "0.5rem" }}>
++        <button
++          type="button"
++          onClick={onConfirm}
++          style={{
++            padding: "0.5rem 1rem",
++            background: "#dc2626",
++            color: "#fff",
++            border: "1px solid rgba(255,255,255,0.2)",
++            borderRadius: "4px",
++          }}
++        >
++          {confirmLabel}
++        </button>
++        <button
++          type="button"
++          onClick={onCancel}
++          style={{
++            padding: "0.5rem 1rem",
++            border: "1px solid rgba(255,255,255,0.2)",
++            borderRadius: "4px",
++            background: "none",
++            color: "inherit",
++          }}
++        >
++          Cancel
++        </button>
++      </div>
++    </div>
++  );
++}
+diff --git a/apps/dev-dashboard/src/components/ResponseViewer.test.tsx b/apps/dev-dashboard/src/components/ResponseViewer.test.tsx
+new file mode 100644
+index 00000000..b347abd7
+--- /dev/null
++++ b/apps/dev-dashboard/src/components/ResponseViewer.test.tsx
+@@ -0,0 +1,24 @@
++import { render, screen } from "@testing-library/react";
++import { describe, expect, it } from "vitest";
++import { ResponseViewer } from "./ResponseViewer";
++
++describe("ResponseViewer", () => {
++  it("renders nothing when idle", () => {
++    const { container } = render(<ResponseViewer state={{ kind: "idle" }} />);
++
++    expect(container).toBeEmptyDOMElement();
++  });
++
++  it("pretty-prints an ok body", () => {
++    render(<ResponseViewer state={{ kind: "ok", status: 200, body: { id: "ACCT-1" } }} />);
++
++    expect(screen.getByText(/ACCT-1/)).toBeInTheDocument();
++  });
++
++  it("surfaces an error message when no body is present", () => {
++    render(<ResponseViewer state={{ kind: "error", status: 404, message: "Not found" }} />);
++
++    expect(screen.getByText(/Not found/)).toBeInTheDocument();
++    expect(screen.getByText(/404/)).toBeInTheDocument();
++  });
++});
+diff --git a/apps/dev-dashboard/src/pages/CohortPreview.test.tsx b/apps/dev-dashboard/src/pages/CohortPreview.test.tsx
+new file mode 100644
+index 00000000..c328d14d
+--- /dev/null
++++ b/apps/dev-dashboard/src/pages/CohortPreview.test.tsx
+@@ -0,0 +1,80 @@
++import { render, screen } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { beforeEach, describe, expect, it, vi } from "vitest";
++import { cohortPreviewApi } from "../api/internal";
++import { EnvironmentProvider } from "../context/EnvironmentContext";
++import { CohortPreview, OPT_OUT_CAVEAT } from "./CohortPreview";
++
++function renderPage() {
++  render(
++    <EnvironmentProvider>
++      <CohortPreview />
++    </EnvironmentProvider>,
++  );
++}
++
++describe("CohortPreview", () => {
++  beforeEach(() => {
++    vi.restoreAllMocks();
++    vi.spyOn(cohortPreviewApi, "get").mockResolvedValue({
++      ok: true,
++      status: 200,
++      data: {
++        cohortSize: 3,
++        proceedCount: 2,
++        skipped: [
++          {
++            practiceId: "ACCT-9",
++            practiceName: "No Email Practice",
++            reason: "NO_PRACTICE_CONTACT_EMAIL",
++          },
++        ],
++        optOutVerified: false,
++      },
++    });
++  });
++
++  it("renders the opt-out caveat before any request is made", () => {
++    renderPage();
++
++    expect(screen.getByText(OPT_OUT_CAVEAT)).toBeInTheDocument();
++    expect(OPT_OUT_CAVEAT).toMatch(/not verified/i);
++  });
++
++  it("states that the preview is read-only", () => {
++    renderPage();
++
++    expect(screen.getByText(/renders no PDF/i)).toBeInTheDocument();
++    expect(screen.getByText(/moves no batch metric/i)).toBeInTheDocument();
++  });
++
++  it("shows cohort size, proceed count, and each skip with its reason", async () => {
++    renderPage();
++
++    await userEvent.click(screen.getByRole("button", { name: "Load preview" }));
++
++    expect(await screen.findByText("3")).toBeInTheDocument();
++    expect(screen.getByText("2")).toBeInTheDocument();
++    expect(screen.getByText("ACCT-9")).toBeInTheDocument();
++    expect(screen.getByText("NO_PRACTICE_CONTACT_EMAIL")).toBeInTheDocument();
++  });
++
++  it("keeps the caveat visible after results load", async () => {
++    renderPage();
++
++    await userEvent.click(screen.getByRole("button", { name: "Load preview" }));
++    await screen.findByText("ACCT-9");
++
++    expect(screen.getByText(OPT_OUT_CAVEAT)).toBeInTheDocument();
++  });
++
++  it("persists nothing from the preview response to storage", async () => {
++    renderPage();
++
++    await userEvent.click(screen.getByRole("button", { name: "Load preview" }));
++    await screen.findByText("ACCT-9");
++
++    expect(JSON.stringify(localStorage)).not.toContain("No Email Practice");
++    expect(JSON.stringify(sessionStorage)).not.toContain("No Email Practice");
++  });
++});
+diff --git a/apps/dev-dashboard/src/pages/CohortPreview.tsx b/apps/dev-dashboard/src/pages/CohortPreview.tsx
+new file mode 100644
+index 00000000..69ef6dee
+--- /dev/null
++++ b/apps/dev-dashboard/src/pages/CohortPreview.tsx
+@@ -0,0 +1,132 @@
++import { useState } from "react";
++import { cohortPreviewApi } from "../api/internal";
++import type { CohortPreviewResponse } from "../api/internal-types";
++import { type ResponseState, ResponseViewer } from "../components/ResponseViewer";
++import { useEnvironment } from "../context/EnvironmentContext";
++
++export const OPT_OUT_CAVEAT =
++  "Opt-out status was not verified. The opt-out guard reads an attribute the practice record does not store, so no practice can appear as OPTED_OUT here — this preview does not tell you whether a practice has opted out.";
++
++const READ_ONLY_NOTE =
++  "Read-only: this renders no PDF, writes no ledger row, sends no email, and moves no batch metric.";
++
++export function CohortPreview() {
++  const { baseUrl, apiKey } = useEnvironment();
++  const [preview, setPreview] = useState<CohortPreviewResponse | null>(null);
++  const [state, setState] = useState<ResponseState>({ kind: "idle" });
++
++  async function load() {
++    setState({ kind: "loading" });
++    const result = await cohortPreviewApi.get({ baseUrl, apiKey });
++    if (result.ok) {
++      setPreview(result.data);
++      setState({ kind: "ok", status: result.status, body: null });
++      return;
++    }
++    setPreview(null);
++    setState({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  return (
++    <section style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
++      <div>
++        <h2 style={{ margin: "0 0 0.25rem" }}>Monthly batch cohort preview</h2>
++        <p style={{ margin: 0, opacity: 0.65, fontSize: "0.9rem" }}>{READ_ONLY_NOTE}</p>
++      </div>
++
++      <p
++        style={{
++          margin: 0,
++          padding: "0.5rem 0.75rem",
++          background: "rgba(250,204,21,0.12)",
++          border: "1px solid rgba(250,204,21,0.4)",
++          borderRadius: "4px",
++          fontSize: "0.85rem",
++        }}
++      >
++        {OPT_OUT_CAVEAT}
++      </p>
++
++      <button
++        type="button"
++        onClick={load}
++        disabled={state.kind === "loading"}
++        style={{
++          padding: "0.5rem 1rem",
++          alignSelf: "flex-start",
++          background: "rgba(255,255,255,0.06)",
++          border: "1px solid rgba(255,255,255,0.12)",
++          borderRadius: "4px",
++          color: "inherit",
++        }}
++      >
++        {state.kind === "loading" ? "Loading…" : "Load preview"}
++      </button>
++
++      {state.kind === "error" && <ResponseViewer state={state} />}
++
++      {preview && (
++        <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
++          <dl
++            style={{
++              display: "flex",
++              gap: "2rem",
++              margin: 0,
++              flexWrap: "wrap",
++            }}
++          >
++            <div>
++              <dt style={{ fontSize: "0.8rem", opacity: 0.7 }}>Cohort size</dt>
++              <dd style={{ margin: 0, fontSize: "1.4rem" }}>{preview.cohortSize}</dd>
++            </div>
++            <div>
++              <dt style={{ fontSize: "0.8rem", opacity: 0.7 }}>Would proceed</dt>
++              <dd style={{ margin: 0, fontSize: "1.4rem" }}>{preview.proceedCount}</dd>
++            </div>
++            <div>
++              <dt style={{ fontSize: "0.8rem", opacity: 0.7 }}>Would skip</dt>
++              <dd style={{ margin: 0, fontSize: "1.4rem" }}>{preview.skipped.length}</dd>
++            </div>
++          </dl>
++
++          {preview.skipped.length > 0 && (
++            <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
++              <thead>
++                <tr>
++                  {["practiceId", "practiceName", "reason"].map((heading) => (
++                    <th
++                      key={heading}
++                      style={{
++                        textAlign: "left",
++                        padding: "0.4rem",
++                        borderBottom: "1px solid rgba(255,255,255,0.15)",
++                      }}
++                    >
++                      {heading}
++                    </th>
++                  ))}
++                </tr>
++              </thead>
++              <tbody>
++                {preview.skipped.map((skip) => (
++                  <tr key={skip.practiceId}>
++                    <td style={{ padding: "0.4rem", fontFamily: "monospace" }}>
++                      {skip.practiceId}
++                    </td>
++                    <td style={{ padding: "0.4rem" }}>{skip.practiceName}</td>
++                    <td style={{ padding: "0.4rem" }}>{skip.reason}</td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          )}
++        </div>
++      )}
++    </section>
++  );
++}
+diff --git a/apps/dev-dashboard/src/pages/PcpReferrals.test.tsx b/apps/dev-dashboard/src/pages/PcpReferrals.test.tsx
+new file mode 100644
+index 00000000..7ee2b37d
+--- /dev/null
++++ b/apps/dev-dashboard/src/pages/PcpReferrals.test.tsx
+@@ -0,0 +1,170 @@
++import { render, screen, waitFor, within } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { beforeEach, describe, expect, it, vi } from "vitest";
++import { referralsApi } from "../api/internal";
++import type { InternalPcpReferral } from "../api/internal-types";
++import { EnvironmentProvider } from "../context/EnvironmentContext";
++import { INGEST_OVERWRITE_WARNING, PcpReferrals } from "./PcpReferrals";
++
++const REFERRAL: InternalPcpReferral = {
++  id: "abc123",
++  leadId: "SF-LEAD-001",
++  fullName: "Jane Doe",
++  mobile: "555-111-2222",
++  email: "jane@example.com",
++  cleanReferrerName: "Dr. Smith",
++  referringProviderId: "prov-1",
++  practiceName: "Smith Family Practice",
++  createdDate: "2026-07-01T00:00:00Z",
++  therapyOrPsychLead: "THERAPY_ONLY",
++  therapyLeadStage: "LEAD",
++  psychLeadStage: "CONTACT",
++  createdAt: "2026-07-01T00:00:00.000Z",
++  updatedAt: "2026-07-01T00:00:00.000Z",
++};
++
++async function openReferral() {
++  render(
++    <EnvironmentProvider>
++      <PcpReferrals />
++    </EnvironmentProvider>,
++  );
++
++  await userEvent.type(screen.getByLabelText("Filter value"), "Smith Family Practice");
++  await userEvent.click(screen.getByRole("button", { name: "Load referrals" }));
++  await userEvent.click(await screen.findByRole("button", { name: "Open" }));
++}
++
++describe("PcpReferrals", () => {
++  beforeEach(() => {
++    vi.restoreAllMocks();
++    vi.spyOn(referralsApi, "list").mockResolvedValue({
++      ok: true,
++      status: 200,
++      data: { referrals: [REFERRAL] },
++    });
++  });
++
++  it("requires confirmation before a delete request is sent", async () => {
++    const remove = vi.spyOn(referralsApi, "remove").mockResolvedValue({
++      ok: true,
++      status: 204,
++      data: null,
++    });
++    await openReferral();
++
++    await userEvent.click(screen.getByRole("button", { name: "Delete referral" }));
++
++    // The dialog is up and nothing has been sent yet.
++    const dialog = screen.getByRole("dialog");
++    expect(remove).not.toHaveBeenCalled();
++
++    await userEvent.click(within(dialog).getByRole("button", { name: "Delete referral" }));
++    await waitFor(() => expect(remove).toHaveBeenCalledWith(expect.anything(), "abc123"));
++  });
++
++  it("sends no delete request when the confirmation is cancelled", async () => {
++    const remove = vi.spyOn(referralsApi, "remove").mockResolvedValue({
++      ok: true,
++      status: 204,
++      data: null,
++    });
++    await openReferral();
++
++    await userEvent.click(screen.getByRole("button", { name: "Delete referral" }));
++    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
++
++    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
++    expect(remove).not.toHaveBeenCalled();
++  });
++
++  it("requires confirmation before an edit is submitted", async () => {
++    const update = vi.spyOn(referralsApi, "update").mockResolvedValue({
++      ok: true,
++      status: 200,
++      data: { ...REFERRAL, therapyLeadStage: "SCHEDULED" },
++    });
++    await openReferral();
++
++    await userEvent.selectOptions(screen.getByLabelText("therapyLeadStage"), "SCHEDULED");
++    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
++
++    expect(update).not.toHaveBeenCalled();
++    const dialog = screen.getByRole("dialog");
++
++    await userEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
++    await waitFor(() =>
++      expect(update).toHaveBeenCalledWith(expect.anything(), "abc123", {
++        therapyLeadStage: "SCHEDULED",
++      }),
++    );
++  });
++
++  it("states on the edit form that edits are overwritten by the next Hex ingest", async () => {
++    await openReferral();
++
++    expect(screen.getByText(INGEST_OVERWRITE_WARNING)).toBeInTheDocument();
++    expect(INGEST_OVERWRITE_WARNING).toMatch(/overwritten by the next Hex ingest/i);
++  });
++
++  it("patches only the changed field, so editing a stage leaves mobile and email alone", async () => {
++    const update = vi.spyOn(referralsApi, "update").mockResolvedValue({
++      ok: true,
++      status: 200,
++      data: REFERRAL,
++    });
++    await openReferral();
++
++    await userEvent.selectOptions(screen.getByLabelText("psychLeadStage"), "PATIENT");
++    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
++    await userEvent.click(
++      within(screen.getByRole("dialog")).getByRole("button", { name: "Save changes" }),
++    );
++
++    await waitFor(() => expect(update).toHaveBeenCalled());
++    const body = update.mock.calls[0]?.[2];
++    expect(body).toEqual({ psychLeadStage: "PATIENT" });
++    expect(body).not.toHaveProperty("mobile");
++    expect(body).not.toHaveProperty("email");
++  });
++
++  it("sends null for an emptied optional field, distinguishing clear from omit", async () => {
++    const update = vi.spyOn(referralsApi, "update").mockResolvedValue({
++      ok: true,
++      status: 200,
++      data: REFERRAL,
++    });
++    await openReferral();
++
++    await userEvent.clear(screen.getByLabelText("mobile"));
++    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
++    await userEvent.click(
++      within(screen.getByRole("dialog")).getByRole("button", { name: "Save changes" }),
++    );
++
++    await waitFor(() => expect(update).toHaveBeenCalled());
++    expect(update.mock.calls[0]?.[2]).toEqual({ mobile: null });
++  });
++
++  it("persists no referral field to localStorage or sessionStorage", async () => {
++    const localSpy = vi.spyOn(Storage.prototype, "setItem");
++    await openReferral();
++
++    const persisted = localSpy.mock.calls.map(([key, value]) => `${key}=${value}`).join("|");
++    for (const phi of [REFERRAL.fullName, REFERRAL.mobile, REFERRAL.email, REFERRAL.leadId]) {
++      expect(persisted).not.toContain(phi);
++    }
++    expect(JSON.stringify(localStorage)).not.toContain("Jane Doe");
++    expect(JSON.stringify(sessionStorage)).not.toContain("Jane Doe");
++  });
++
++  it("does not offer unfiltered listing — the load button is disabled without a filter", async () => {
++    render(
++      <EnvironmentProvider>
++        <PcpReferrals />
++      </EnvironmentProvider>,
++    );
++
++    expect(screen.getByRole("button", { name: "Load referrals" })).toBeDisabled();
++  });
++});
+diff --git a/apps/dev-dashboard/src/pages/PcpReferrals.tsx b/apps/dev-dashboard/src/pages/PcpReferrals.tsx
+new file mode 100644
+index 00000000..7537208b
+--- /dev/null
++++ b/apps/dev-dashboard/src/pages/PcpReferrals.tsx
+@@ -0,0 +1,343 @@
++import { useState } from "react";
++import { type ApiTarget, referralsApi } from "../api/internal";
++import {
++  type InternalPcpReferral,
++  LEAD_STAGES,
++  type LeadStage,
++  type UpdateInternalPcpReferralRequest,
++} from "../api/internal-types";
++import { ConfirmDialog } from "../components/ConfirmDialog";
++import { type ResponseState, ResponseViewer } from "../components/ResponseViewer";
++import { useEnvironment } from "../context/EnvironmentContext";
++
++export const INGEST_OVERWRITE_WARNING =
++  "Edits here are overwritten by the next Hex ingest run. Treat them as temporary test state, not a durable correction.";
++
++type Filter = "practiceName" | "cleanReferrerName" | "referringProviderId" | "fullName";
++
++const FILTERS: Array<{ value: Filter; label: string }> = [
++  { value: "practiceName", label: "practiceName" },
++  { value: "cleanReferrerName", label: "cleanReferrerName" },
++  { value: "referringProviderId", label: "referringProviderId (case-sensitive)" },
++  { value: "fullName", label: "fullName" },
++];
++
++const FIELD_STYLE = {
++  padding: "0.4rem 0.5rem",
++  background: "rgba(255,255,255,0.06)",
++  border: "1px solid rgba(255,255,255,0.12)",
++  borderRadius: "4px",
++  color: "inherit",
++} as const;
++
++type PendingAction =
++  | { kind: "delete"; referral: InternalPcpReferral }
++  | { kind: "save"; referral: InternalPcpReferral; body: UpdateInternalPcpReferralRequest };
++
++export function PcpReferrals() {
++  const { baseUrl, apiKey } = useEnvironment();
++  const target: ApiTarget = { baseUrl, apiKey };
++
++  const [filter, setFilter] = useState<Filter>("practiceName");
++  const [filterValue, setFilterValue] = useState("");
++  const [referrals, setReferrals] = useState<InternalPcpReferral[]>([]);
++  const [listState, setListState] = useState<ResponseState>({ kind: "idle" });
++
++  const [selected, setSelected] = useState<InternalPcpReferral | null>(null);
++  const [pending, setPending] = useState<PendingAction | null>(null);
++  const [mutationState, setMutationState] = useState<ResponseState>({ kind: "idle" });
++
++  async function loadList() {
++    setListState({ kind: "loading" });
++    const result = await referralsApi.list(target, { [filter]: filterValue });
++    if (result.ok) {
++      setReferrals(result.data.referrals);
++      setListState({ kind: "ok", status: result.status, body: null });
++      return;
++    }
++    setReferrals([]);
++    setListState({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  async function runPending() {
++    const action = pending;
++    setPending(null);
++    if (!action) return;
++
++    setMutationState({ kind: "loading" });
++    const result =
++      action.kind === "delete"
++        ? await referralsApi.remove(target, action.referral.id)
++        : await referralsApi.update(target, action.referral.id, action.body);
++
++    if (result.ok) {
++      setMutationState({ kind: "ok", status: result.status, body: null });
++      setSelected(action.kind === "delete" ? null : (result.data as InternalPcpReferral));
++      await loadList();
++      return;
++    }
++    setMutationState({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  return (
++    <section style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
++      <div>
++        <h2 style={{ margin: "0 0 0.25rem" }}>PCP Referrals</h2>
++        <p style={{ margin: 0, opacity: 0.65, fontSize: "0.9rem" }}>
++          These records carry patient data. A filter is required — unfiltered listing is not
++          offered.
++        </p>
++      </div>
++
++      <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-end", flexWrap: "wrap" }}>
++        <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++          <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>Filter</span>
++          <select
++            aria-label="Filter"
++            value={filter}
++            onChange={(e) => setFilter(e.target.value as Filter)}
++            style={FIELD_STYLE}
++          >
++            {FILTERS.map(({ value, label }) => (
++              <option key={value} value={value}>
++                {label}
++              </option>
++            ))}
++          </select>
++        </label>
++        <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++          <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>Value</span>
++          <input
++            aria-label="Filter value"
++            value={filterValue}
++            onChange={(e) => setFilterValue(e.target.value)}
++            style={FIELD_STYLE}
++          />
++        </label>
++        <button type="button" onClick={loadList} disabled={!filterValue} style={FIELD_STYLE}>
++          Load referrals
++        </button>
++      </div>
++
++      {listState.kind === "error" && <ResponseViewer state={listState} />}
++
++      {referrals.length > 0 && (
++        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
++          <thead>
++            <tr>
++              {["id", "fullName", "practiceName", "therapyOrPsychLead", ""].map((heading) => (
++                <th
++                  key={heading}
++                  style={{
++                    textAlign: "left",
++                    padding: "0.4rem",
++                    borderBottom: "1px solid rgba(255,255,255,0.15)",
++                  }}
++                >
++                  {heading}
++                </th>
++              ))}
++            </tr>
++          </thead>
++          <tbody>
++            {referrals.map((referral) => (
++              <tr key={referral.id}>
++                <td style={{ padding: "0.4rem", fontFamily: "monospace" }}>{referral.id}</td>
++                <td style={{ padding: "0.4rem" }}>{referral.fullName}</td>
++                <td style={{ padding: "0.4rem" }}>{referral.practiceName}</td>
++                <td style={{ padding: "0.4rem" }}>{referral.therapyOrPsychLead}</td>
++                <td style={{ padding: "0.4rem" }}>
++                  <button
++                    type="button"
++                    onClick={() => {
++                      setSelected(referral);
++                      setMutationState({ kind: "idle" });
++                    }}
++                    style={FIELD_STYLE}
++                  >
++                    Open
++                  </button>
++                </td>
++              </tr>
++            ))}
++          </tbody>
++        </table>
++      )}
++
++      {selected && (
++        <ReferralEditForm
++          referral={selected}
++          onSaveRequested={(body) => setPending({ kind: "save", referral: selected, body })}
++          onDeleteRequested={() => setPending({ kind: "delete", referral: selected })}
++          onNoChanges={() =>
++            setMutationState({ kind: "error", status: null, message: "No changes to save." })
++          }
++        />
++      )}
++
++      {pending && (
++        <ConfirmDialog
++          title={
++            pending.kind === "delete"
++              ? `Delete referral ${pending.referral.id}?`
++              : `Save changes to referral ${pending.referral.id}?`
++          }
++          body={
++            pending.kind === "delete"
++              ? "This removes a record containing patient data. Other referrals are unaffected."
++              : INGEST_OVERWRITE_WARNING
++          }
++          confirmLabel={pending.kind === "delete" ? "Delete referral" : "Save changes"}
++          onConfirm={runPending}
++          onCancel={() => setPending(null)}
++        />
++      )}
++
++      {mutationState.kind !== "idle" && <ResponseViewer state={mutationState} />}
++    </section>
++  );
++}
++
++interface EditProps {
++  referral: InternalPcpReferral;
++  onSaveRequested: (body: UpdateInternalPcpReferralRequest) => void;
++  onDeleteRequested: () => void;
++  onNoChanges: () => void;
++}
++
++function ReferralEditForm({
++  referral,
++  onSaveRequested,
++  onDeleteRequested,
++  onNoChanges,
++}: EditProps) {
++  const [therapyLeadStage, setTherapyLeadStage] = useState(referral.therapyLeadStage ?? "");
++  const [psychLeadStage, setPsychLeadStage] = useState(referral.psychLeadStage ?? "");
++  const [mobile, setMobile] = useState(referral.mobile ?? "");
++  const [email, setEmail] = useState(referral.email ?? "");
++
++  function requestSave() {
++    // An emptied optional field sends null (clear); an unchanged one is omitted,
++    // so saving one stage field cannot disturb the others.
++    const body: UpdateInternalPcpReferralRequest = {};
++    if (therapyLeadStage !== (referral.therapyLeadStage ?? "")) {
++      body.therapyLeadStage = therapyLeadStage === "" ? null : (therapyLeadStage as LeadStage);
++    }
++    if (psychLeadStage !== (referral.psychLeadStage ?? "")) {
++      body.psychLeadStage = psychLeadStage === "" ? null : (psychLeadStage as LeadStage);
++    }
++    if (mobile !== (referral.mobile ?? "")) body.mobile = mobile === "" ? null : mobile;
++    if (email !== (referral.email ?? "")) body.email = email === "" ? null : email;
++
++    if (Object.keys(body).length === 0) {
++      onNoChanges();
++      return;
++    }
++    onSaveRequested(body);
++  }
++
++  return (
++    <div
++      style={{
++        border: "1px solid rgba(255,255,255,0.12)",
++        borderRadius: "4px",
++        padding: "1rem",
++        display: "flex",
++        flexDirection: "column",
++        gap: "0.75rem",
++      }}
++    >
++      <strong>Referral {referral.id}</strong>
++
++      <p
++        style={{
++          margin: 0,
++          padding: "0.5rem 0.75rem",
++          background: "rgba(250,204,21,0.12)",
++          border: "1px solid rgba(250,204,21,0.4)",
++          borderRadius: "4px",
++          fontSize: "0.85rem",
++        }}
++      >
++        {INGEST_OVERWRITE_WARNING}
++      </p>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>therapyLeadStage</span>
++        <select
++          aria-label="therapyLeadStage"
++          value={therapyLeadStage}
++          onChange={(e) => setTherapyLeadStage(e.target.value)}
++          style={FIELD_STYLE}
++        >
++          <option value="">— (clear)</option>
++          {LEAD_STAGES.map((stage) => (
++            <option key={stage} value={stage}>
++              {stage}
++            </option>
++          ))}
++        </select>
++      </label>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>psychLeadStage</span>
++        <select
++          aria-label="psychLeadStage"
++          value={psychLeadStage}
++          onChange={(e) => setPsychLeadStage(e.target.value)}
++          style={FIELD_STYLE}
++        >
++          <option value="">— (clear)</option>
++          {LEAD_STAGES.map((stage) => (
++            <option key={stage} value={stage}>
++              {stage}
++            </option>
++          ))}
++        </select>
++      </label>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>mobile (clear to remove)</span>
++        <input
++          aria-label="mobile"
++          value={mobile}
++          onChange={(e) => setMobile(e.target.value)}
++          style={FIELD_STYLE}
++        />
++      </label>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>email (clear to remove)</span>
++        <input
++          aria-label="email"
++          value={email}
++          onChange={(e) => setEmail(e.target.value)}
++          style={FIELD_STYLE}
++        />
++      </label>
++
++      <div style={{ display: "flex", gap: "0.5rem" }}>
++        <button type="button" onClick={requestSave} style={FIELD_STYLE}>
++          Save changes
++        </button>
++        <button
++          type="button"
++          onClick={onDeleteRequested}
++          style={{ ...FIELD_STYLE, background: "#dc2626", color: "#fff" }}
++        >
++          Delete referral
++        </button>
++      </div>
++    </div>
++  );
++}
+diff --git a/apps/dev-dashboard/src/pages/Practices.test.tsx b/apps/dev-dashboard/src/pages/Practices.test.tsx
+new file mode 100644
+index 00000000..4c7a34b5
+--- /dev/null
++++ b/apps/dev-dashboard/src/pages/Practices.test.tsx
+@@ -0,0 +1,156 @@
++import { render, screen, waitFor, within } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { beforeEach, describe, expect, it, vi } from "vitest";
++import { practicesApi } from "../api/internal";
++import type { InternalPractice } from "../api/internal-types";
++import { EnvironmentProvider } from "../context/EnvironmentContext";
++import { Practices } from "./Practices";
++
++const PRACTICE: InternalPractice = {
++  id: "ACCT-001",
++  name: "Smith Family Practice",
++  status: "SOLD",
++  accountManager: "Jordan Lee",
++  practiceEmail: "front-desk@smith.example",
++  createdAt: "2026-07-01T00:00:00.000Z",
++  updatedAt: "2026-07-01T00:00:00.000Z",
++};
++
++async function openPractice() {
++  render(
++    <EnvironmentProvider>
++      <Practices />
++    </EnvironmentProvider>,
++  );
++
++  await userEvent.click(screen.getByRole("button", { name: "Load practices" }));
++  await userEvent.click(await screen.findByRole("button", { name: "Open" }));
++}
++
++describe("Practices", () => {
++  beforeEach(() => {
++    vi.restoreAllMocks();
++    vi.spyOn(practicesApi, "list").mockResolvedValue({
++      ok: true,
++      status: 200,
++      data: { practices: [PRACTICE] },
++    });
++    vi.spyOn(practicesApi, "get").mockResolvedValue({
++      ok: true,
++      status: 200,
++      data: PRACTICE,
++    });
++  });
++
++  it("exposes no optedOut control — it is not a stored attribute", async () => {
++    await openPractice();
++
++    expect(screen.queryByLabelText(/optedOut/i)).not.toBeInTheDocument();
++    expect(screen.queryByText(/opted ?out/i)).not.toBeInTheDocument();
++  });
++
++  it("requires confirmation before a delete request is sent", async () => {
++    const remove = vi
++      .spyOn(practicesApi, "remove")
++      .mockResolvedValue({ ok: true, status: 204, data: null });
++    await openPractice();
++
++    await userEvent.click(screen.getByRole("button", { name: "Delete practice" }));
++    expect(remove).not.toHaveBeenCalled();
++
++    await userEvent.click(
++      within(screen.getByRole("dialog")).getByRole("button", { name: "Delete practice" }),
++    );
++    await waitFor(() => expect(remove).toHaveBeenCalledWith(expect.anything(), "ACCT-001"));
++  });
++
++  it("patches only changed fields, leaving untouched ones out of the body", async () => {
++    const update = vi
++      .spyOn(practicesApi, "update")
++      .mockResolvedValue({ ok: true, status: 200, data: PRACTICE });
++    await openPractice();
++
++    await userEvent.selectOptions(screen.getByLabelText("status"), "CHURNED");
++    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
++
++    await waitFor(() => expect(update).toHaveBeenCalled());
++    expect(update.mock.calls[0]?.[2]).toEqual({ status: "CHURNED" });
++  });
++
++  it("sends null for an emptied accountManager so the field is cleared", async () => {
++    const update = vi
++      .spyOn(practicesApi, "update")
++      .mockResolvedValue({ ok: true, status: 200, data: PRACTICE });
++    await openPractice();
++
++    await userEvent.clear(screen.getByLabelText("accountManager"));
++    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
++
++    await waitFor(() => expect(update).toHaveBeenCalled());
++    expect(update.mock.calls[0]?.[2]).toEqual({ accountManager: null });
++  });
++
++  it("omits optional fields left blank on create rather than sending empty strings", async () => {
++    const create = vi
++      .spyOn(practicesApi, "create")
++      .mockResolvedValue({ ok: true, status: 201, data: PRACTICE });
++    render(
++      <EnvironmentProvider>
++        <Practices />
++      </EnvironmentProvider>,
++    );
++
++    await userEvent.type(screen.getByLabelText("new id"), "ACCT-777");
++    await userEvent.type(screen.getByLabelText("new name"), "Fresh Practice");
++    await userEvent.click(screen.getByRole("button", { name: "Create practice" }));
++
++    await waitFor(() => expect(create).toHaveBeenCalled());
++    expect(create.mock.calls[0]?.[1]).toEqual({
++      id: "ACCT-777",
++      name: "Fresh Practice",
++      status: "SOLD",
++    });
++  });
++
++  it("surfaces a 409 conflict rather than failing silently", async () => {
++    vi.spyOn(practicesApi, "create").mockResolvedValue({
++      ok: false,
++      status: 409,
++      message: "Already exists — pick a different id.",
++      body: { errorType: "ConflictError" },
++    });
++    render(
++      <EnvironmentProvider>
++        <Practices />
++      </EnvironmentProvider>,
++    );
++
++    await userEvent.type(screen.getByLabelText("new id"), "ACCT-001");
++    await userEvent.type(screen.getByLabelText("new name"), "Duplicate");
++    await userEvent.click(screen.getByRole("button", { name: "Create practice" }));
++
++    // ResponseViewer renders the response body when present, falling back to the
++    // message only when the server sent none.
++    expect(await screen.findByText(/409 Error/)).toBeInTheDocument();
++    expect(screen.getByText(/ConflictError/)).toBeInTheDocument();
++  });
++
++  it("falls back to the mapped message when the server sends no body", async () => {
++    vi.spyOn(practicesApi, "create").mockResolvedValue({
++      ok: false,
++      status: 409,
++      message: "Already exists — pick a different id.",
++    });
++    render(
++      <EnvironmentProvider>
++        <Practices />
++      </EnvironmentProvider>,
++    );
++
++    await userEvent.type(screen.getByLabelText("new id"), "ACCT-001");
++    await userEvent.type(screen.getByLabelText("new name"), "Duplicate");
++    await userEvent.click(screen.getByRole("button", { name: "Create practice" }));
++
++    expect(await screen.findByText(/Already exists/)).toBeInTheDocument();
++  });
++});
+diff --git a/apps/dev-dashboard/src/pages/Practices.tsx b/apps/dev-dashboard/src/pages/Practices.tsx
+new file mode 100644
+index 00000000..a7a18fbc
+--- /dev/null
++++ b/apps/dev-dashboard/src/pages/Practices.tsx
+@@ -0,0 +1,440 @@
++import { useState } from "react";
++import { type ApiTarget, practicesApi } from "../api/internal";
++import {
++  type CreateInternalPracticeRequest,
++  type InternalPractice,
++  PRACTICE_STATUSES,
++  type PracticeStatus,
++  type UpdateInternalPracticeRequest,
++} from "../api/internal-types";
++import { ConfirmDialog } from "../components/ConfirmDialog";
++import { type ResponseState, ResponseViewer } from "../components/ResponseViewer";
++import { useEnvironment } from "../context/EnvironmentContext";
++
++type Filter = "none" | "name" | "status" | "accountManager";
++
++const FIELD_STYLE = {
++  padding: "0.4rem 0.5rem",
++  background: "rgba(255,255,255,0.06)",
++  border: "1px solid rgba(255,255,255,0.12)",
++  borderRadius: "4px",
++  color: "inherit",
++} as const;
++
++export function Practices() {
++  const { baseUrl, apiKey } = useEnvironment();
++  const target: ApiTarget = { baseUrl, apiKey };
++
++  const [filter, setFilter] = useState<Filter>("none");
++  const [filterValue, setFilterValue] = useState("");
++  const [practices, setPractices] = useState<InternalPractice[]>([]);
++  const [listState, setListState] = useState<ResponseState>({ kind: "idle" });
++
++  const [selected, setSelected] = useState<InternalPractice | null>(null);
++  const [pendingDelete, setPendingDelete] = useState<InternalPractice | null>(null);
++  const [mutationState, setMutationState] = useState<ResponseState>({ kind: "idle" });
++
++  async function loadList() {
++    setListState({ kind: "loading" });
++    const params = filter === "none" || filterValue === "" ? {} : { [filter]: filterValue };
++    const result = await practicesApi.list(target, params);
++    if (result.ok) {
++      setPractices(result.data.practices);
++      setListState({ kind: "ok", status: result.status, body: null });
++      return;
++    }
++    setPractices([]);
++    setListState({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  async function openDetail(id: string) {
++    const result = await practicesApi.get(target, id);
++    if (result.ok) {
++      setSelected(result.data);
++      setMutationState({ kind: "idle" });
++      return;
++    }
++    setSelected(null);
++    setMutationState({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  async function confirmDelete() {
++    const practice = pendingDelete;
++    setPendingDelete(null);
++    if (!practice) return;
++
++    setMutationState({ kind: "loading" });
++    const result = await practicesApi.remove(target, practice.id);
++    if (result.ok) {
++      setMutationState({ kind: "ok", status: result.status, body: null });
++      setSelected(null);
++      await loadList();
++      return;
++    }
++    setMutationState({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  return (
++    <section style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
++      <div>
++        <h2 style={{ margin: "0 0 0.25rem" }}>Practices</h2>
++        <p style={{ margin: 0, opacity: 0.65, fontSize: "0.9rem" }}>
++          Full CRUD over stored practice records. Name and account-manager lookups are
++          case-insensitive.
++        </p>
++      </div>
++
++      <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-end", flexWrap: "wrap" }}>
++        <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++          <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>Filter</span>
++          <select
++            aria-label="Filter"
++            value={filter}
++            onChange={(e) => setFilter(e.target.value as Filter)}
++            style={FIELD_STYLE}
++          >
++            <option value="none">No filter (scan)</option>
++            <option value="name">name</option>
++            <option value="status">status</option>
++            <option value="accountManager">accountManager</option>
++          </select>
++        </label>
++
++        {filter !== "none" && (
++          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++            <label htmlFor="practice-filter-value" style={{ fontSize: "0.8rem", opacity: 0.8 }}>
++              Value
++            </label>
++            {filter === "status" ? (
++              <select
++                id="practice-filter-value"
++                value={filterValue}
++                onChange={(e) => setFilterValue(e.target.value)}
++                style={FIELD_STYLE}
++              >
++                <option value="">—</option>
++                {PRACTICE_STATUSES.map((status) => (
++                  <option key={status} value={status}>
++                    {status}
++                  </option>
++                ))}
++              </select>
++            ) : (
++              <input
++                id="practice-filter-value"
++                value={filterValue}
++                onChange={(e) => setFilterValue(e.target.value)}
++                style={FIELD_STYLE}
++              />
++            )}
++          </div>
++        )}
++
++        <button type="button" onClick={loadList} style={FIELD_STYLE}>
++          Load practices
++        </button>
++      </div>
++
++      {listState.kind === "error" && <ResponseViewer state={listState} />}
++
++      {practices.length > 0 && (
++        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
++          <thead>
++            <tr>
++              {["id", "name", "status", "accountManager", ""].map((heading) => (
++                <th
++                  key={heading}
++                  style={{
++                    textAlign: "left",
++                    padding: "0.4rem",
++                    borderBottom: "1px solid rgba(255,255,255,0.15)",
++                  }}
++                >
++                  {heading}
++                </th>
++              ))}
++            </tr>
++          </thead>
++          <tbody>
++            {practices.map((practice) => (
++              <tr key={practice.id}>
++                <td style={{ padding: "0.4rem", fontFamily: "monospace" }}>{practice.id}</td>
++                <td style={{ padding: "0.4rem" }}>{practice.name}</td>
++                <td style={{ padding: "0.4rem" }}>{practice.status}</td>
++                <td style={{ padding: "0.4rem" }}>{practice.accountManager ?? "—"}</td>
++                <td style={{ padding: "0.4rem" }}>
++                  <button type="button" onClick={() => openDetail(practice.id)} style={FIELD_STYLE}>
++                    Open
++                  </button>
++                </td>
++              </tr>
++            ))}
++          </tbody>
++        </table>
++      )}
++
++      {selected && (
++        <PracticeDetail
++          practice={selected}
++          onDeleteRequested={() => setPendingDelete(selected)}
++          onSaved={async (updated) => {
++            setSelected(updated);
++            setMutationState({ kind: "ok", status: 200, body: updated });
++            await loadList();
++          }}
++          onError={setMutationState}
++          target={target}
++        />
++      )}
++
++      {pendingDelete && (
++        <ConfirmDialog
++          title={`Delete practice ${pendingDelete.id}?`}
++          body="This removes the stored record. Other practices are unaffected."
++          confirmLabel="Delete practice"
++          onConfirm={confirmDelete}
++          onCancel={() => setPendingDelete(null)}
++        />
++      )}
++
++      {mutationState.kind !== "idle" && <ResponseViewer state={mutationState} />}
++
++      <hr style={{ border: "none", borderTop: "1px solid rgba(255,255,255,0.1)" }} />
++
++      <CreatePracticeForm
++        target={target}
++        onCreated={async () => {
++          await loadList();
++        }}
++        onResult={setMutationState}
++      />
++    </section>
++  );
++}
++
++interface DetailProps {
++  practice: InternalPractice;
++  target: ApiTarget;
++  onDeleteRequested: () => void;
++  onSaved: (updated: InternalPractice) => void | Promise<void>;
++  onError: (state: ResponseState) => void;
++}
++
++function PracticeDetail({ practice, target, onDeleteRequested, onSaved, onError }: DetailProps) {
++  const [name, setName] = useState(practice.name);
++  const [status, setStatus] = useState<PracticeStatus>(practice.status);
++  const [accountManager, setAccountManager] = useState(practice.accountManager ?? "");
++  const [practiceEmail, setPracticeEmail] = useState(practice.practiceEmail ?? "");
++
++  async function save() {
++    // An emptied optional field sends null (clear); an unchanged one is omitted.
++    const body: UpdateInternalPracticeRequest = {};
++    if (name !== practice.name) body.name = name;
++    if (status !== practice.status) body.status = status;
++    if (accountManager !== (practice.accountManager ?? "")) {
++      body.accountManager = accountManager === "" ? null : accountManager;
++    }
++    if (practiceEmail !== (practice.practiceEmail ?? "")) {
++      body.practiceEmail = practiceEmail === "" ? null : practiceEmail;
++    }
++
++    if (Object.keys(body).length === 0) {
++      onError({ kind: "error", status: null, message: "No changes to save." });
++      return;
++    }
++
++    const result = await practicesApi.update(target, practice.id, body);
++    if (result.ok) {
++      await onSaved(result.data);
++      return;
++    }
++    onError({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  return (
++    <div
++      style={{
++        border: "1px solid rgba(255,255,255,0.12)",
++        borderRadius: "4px",
++        padding: "1rem",
++        display: "flex",
++        flexDirection: "column",
++        gap: "0.75rem",
++      }}
++    >
++      <strong>Practice {practice.id}</strong>
++      <p style={{ margin: 0, fontSize: "0.85rem", opacity: 0.7 }}>
++        Created {practice.createdAt} · Updated {practice.updatedAt}
++      </p>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>name</span>
++        <input
++          aria-label="name"
++          value={name}
++          onChange={(e) => setName(e.target.value)}
++          style={FIELD_STYLE}
++        />
++      </label>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>status</span>
++        <select
++          aria-label="status"
++          value={status}
++          onChange={(e) => setStatus(e.target.value as PracticeStatus)}
++          style={FIELD_STYLE}
++        >
++          {PRACTICE_STATUSES.map((value) => (
++            <option key={value} value={value}>
++              {value}
++            </option>
++          ))}
++        </select>
++      </label>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>accountManager (clear to remove)</span>
++        <input
++          aria-label="accountManager"
++          value={accountManager}
++          onChange={(e) => setAccountManager(e.target.value)}
++          style={FIELD_STYLE}
++        />
++      </label>
++
++      <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
++        <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>practiceEmail (clear to remove)</span>
++        <input
++          aria-label="practiceEmail"
++          value={practiceEmail}
++          onChange={(e) => setPracticeEmail(e.target.value)}
++          style={FIELD_STYLE}
++        />
++      </label>
++
++      <div style={{ display: "flex", gap: "0.5rem" }}>
++        <button type="button" onClick={save} style={FIELD_STYLE}>
++          Save changes
++        </button>
++        <button
++          type="button"
++          onClick={onDeleteRequested}
++          style={{ ...FIELD_STYLE, background: "#dc2626", color: "#fff" }}
++        >
++          Delete practice
++        </button>
++      </div>
++    </div>
++  );
++}
++
++interface CreateProps {
++  target: ApiTarget;
++  onCreated: () => void | Promise<void>;
++  onResult: (state: ResponseState) => void;
++}
++
++function CreatePracticeForm({ target, onCreated, onResult }: CreateProps) {
++  const [id, setId] = useState("");
++  const [name, setName] = useState("");
++  const [status, setStatus] = useState<PracticeStatus>("SOLD");
++  const [accountManager, setAccountManager] = useState("");
++  const [practiceEmail, setPracticeEmail] = useState("");
++
++  async function submit() {
++    const body: CreateInternalPracticeRequest = {
++      id,
++      name,
++      status,
++      ...(accountManager !== "" && { accountManager }),
++      ...(practiceEmail !== "" && { practiceEmail }),
++    };
++
++    const result = await practicesApi.create(target, body);
++    if (result.ok) {
++      onResult({ kind: "ok", status: result.status, body: result.data });
++      setId("");
++      setName("");
++      await onCreated();
++      return;
++    }
++    onResult({
++      kind: "error",
++      status: result.status,
++      message: result.message,
++      body: result.body,
++    });
++  }
++
++  return (
++    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
++      <strong>Create a practice</strong>
++      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
++        <input
++          aria-label="new id"
++          placeholder="id"
++          value={id}
++          onChange={(e) => setId(e.target.value)}
++          style={FIELD_STYLE}
++        />
++        <input
++          aria-label="new name"
++          placeholder="name"
++          value={name}
++          onChange={(e) => setName(e.target.value)}
++          style={FIELD_STYLE}
++        />
++        <select
++          aria-label="new status"
++          value={status}
++          onChange={(e) => setStatus(e.target.value as PracticeStatus)}
++          style={FIELD_STYLE}
++        >
++          {PRACTICE_STATUSES.map((value) => (
++            <option key={value} value={value}>
++              {value}
++            </option>
++          ))}
++        </select>
++        <input
++          aria-label="new accountManager"
++          placeholder="accountManager"
++          value={accountManager}
++          onChange={(e) => setAccountManager(e.target.value)}
++          style={FIELD_STYLE}
++        />
++        <input
++          aria-label="new practiceEmail"
++          placeholder="practiceEmail"
++          value={practiceEmail}
++          onChange={(e) => setPracticeEmail(e.target.value)}
++          style={FIELD_STYLE}
++        />
++        <button type="button" onClick={submit} disabled={!(id && name)} style={FIELD_STYLE}>
++          Create practice
++        </button>
++      </div>
++    </div>
++  );
++}
+diff --git a/apps/dev-dashboard/src/vite-env.d.ts b/apps/dev-dashboard/src/vite-env.d.ts
+index d43868c4..b2b1c228 100644
+--- a/apps/dev-dashboard/src/vite-env.d.ts
++++ b/apps/dev-dashboard/src/vite-env.d.ts
+@@ -1,4 +1,5 @@
+ /// <reference types="vite/client" />
++/// <reference types="@testing-library/jest-dom" />
+ 
+ interface ImportMetaEnv {
+   readonly VITE_API_BASE_URL?: string;
+diff --git a/apps/dev-dashboard/vitest.config.ts b/apps/dev-dashboard/vitest.config.ts
+new file mode 100644
+index 00000000..33b56c9b
+--- /dev/null
++++ b/apps/dev-dashboard/vitest.config.ts
+@@ -0,0 +1,13 @@
++import react from "@vitejs/plugin-react";
++import { defineProject } from "vitest/config";
++
++export default defineProject({
++  plugins: [react()],
++  test: {
++    name: "dev-dashboard",
++    environment: "jsdom",
++    globals: true,
++    setupFiles: ["./vitest.setup.ts"],
++    include: ["src/**/*.test.tsx", "src/**/*.test.ts"],
++  },
++});
+diff --git a/apps/dev-dashboard/vitest.setup.ts b/apps/dev-dashboard/vitest.setup.ts
+new file mode 100644
+index 00000000..81fa5325
+--- /dev/null
++++ b/apps/dev-dashboard/vitest.setup.ts
+@@ -0,0 +1,9 @@
++import "@testing-library/jest-dom/vitest";
++import { cleanup } from "@testing-library/react";
++import { afterEach } from "vitest";
++
++afterEach(() => {
++  cleanup();
++  localStorage.clear();
++  sessionStorage.clear();
++});
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index ef3f05aa..13de9826 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -52,7 +52,7 @@ importers:
+         version: 6.0.3
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+ 
+   apps/api:
+     dependencies:
+@@ -133,6 +133,15 @@ importers:
+         specifier: ^19.2.8
+         version: 19.2.8(react@19.2.8)
+     devDependencies:
++      '@testing-library/jest-dom':
++        specifier: ^7.0.0
++        version: 7.0.0(@testing-library/dom@10.4.1)
++      '@testing-library/react':
++        specifier: ^16.3.2
++        version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
++      '@testing-library/user-event':
++        specifier: ^14.6.1
++        version: 14.6.1(@testing-library/dom@10.4.1)
+       '@types/react':
+         specifier: ^19.1.8
+         version: 19.2.17
+@@ -142,12 +151,15 @@ importers:
+       '@vitejs/plugin-react':
+         specifier: ^6.0.1
+         version: 6.0.3(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++      jsdom:
++        specifier: ^30.0.1
++        version: 30.0.1
+       vite:
+         specifier: ^8.1.4
+         version: 8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0)
+       vitest:
+         specifier: ^4.1.5
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+ 
+   apps/jobs/batch-runner:
+     dependencies:
+@@ -203,7 +215,7 @@ importers:
+         version: 6.0.3
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+ 
+   packages/data:
+     dependencies:
+@@ -222,7 +234,7 @@ importers:
+     devDependencies:
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+ 
+   packages/feature-flags:
+     dependencies:
+@@ -235,7 +247,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -251,7 +263,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -267,7 +279,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -283,7 +295,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -299,7 +311,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -318,7 +330,7 @@ importers:
+         version: 2.4.5
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -334,7 +346,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -350,7 +362,7 @@ importers:
+     devDependencies:
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+ 
+   packages/prospect-service-client:
+     dependencies:
+@@ -363,7 +375,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -379,7 +391,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -395,7 +407,7 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+@@ -411,13 +423,24 @@ importers:
+         version: 3.1096.0
+       vitest:
+         specifier: ^4.1.2
+-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+       zod:
+         specifier: ^4.4.3
+         version: 4.4.3
+ 
+ packages:
+ 
++  '@adobe/css-tools@4.5.0':
++    resolution: {integrity: sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q==}
++
++  '@asamuzakjp/css-color@6.0.5':
++    resolution: {integrity: sha512-mbhpPMmnw/kwW19aRNmSUl1QzLbdGo1SCuE49BT98MNwqF6zaHb3o2owssFc/PEO/4t2UjqtCNwocuDtJornzA==}
++    engines: {node: ^22.13.0 || >=24.0.0}
++
++  '@asamuzakjp/dom-selector@8.3.0':
++    resolution: {integrity: sha512-UJLfKXBhrc8i1vH2eJXuYQMwlsLKWFw3O+CPqXSuVEiikeAim3UgrfWX0k4tA/X8cRFM8iZ7OaqBokFGbYusdg==}
++    engines: {node: ^22.13.0 || >=24.0.0}
++
+   '@asyncapi/specs@6.10.0':
+     resolution: {integrity: sha512-vB5oKLsdrLUORIZ5BXortZTlVyGWWMC1Nud/0LtgxQ3Yn2738HigAD6EVqScvpPsDUI/bcLVsYEXN4dtXQHVng==}
+ 
+@@ -661,6 +684,10 @@ packages:
+     engines: {node: ^22.18.0 || >=24.11.0}
+     hasBin: true
+ 
++  '@babel/runtime@7.29.7':
++    resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
++    engines: {node: '>=6.9.0'}
++
+   '@babel/template@7.29.7':
+     resolution: {integrity: sha512-puq+Gf35oI24FeN11LkoUQFqv9uwNeWpxXZi/Ji3rRIoKAzKnxRaZ+Gkj0vKS9ZCiTESfng1N9LyOyXvo+m+Gg==}
+     engines: {node: '>=6.9.0'}
+@@ -745,6 +772,46 @@ packages:
+   '@borewit/text-codec@0.2.2':
+     resolution: {integrity: sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ==}
+ 
++  '@bramus/specificity@2.4.2':
++    resolution: {integrity: sha512-ctxtJ/eA+t+6q2++vj5j7FYX3nRu311q1wfYH3xjlLOsczhlhxAg2FWNUXhpGvAw3BWo1xBcvOV6/YLc2r5FJw==}
++    hasBin: true
++
++  '@csstools/color-helpers@6.1.0':
++    resolution: {integrity: sha512-064IFJdjTfUqnjpCVpMOdbr8FLQBhinbZj6yRv2An2E41O/pLEXqfFRWqGq/SxlE5PEUYTlvWsG2r8MswAVvkg==}
++    engines: {node: '>=20.19.0'}
++
++  '@csstools/css-calc@3.3.0':
++    resolution: {integrity: sha512-c5ihYsPkdG6JCkU2zTMm4+k6r7RXuGxtWYhu5DHMIiF1FHzrfmHL5so11AoFpUv/tu61xfcmT4AmKoFfMPoqdQ==}
++    engines: {node: '>=20.19.0'}
++    peerDependencies:
++      '@csstools/css-parser-algorithms': ^4.0.0
++      '@csstools/css-tokenizer': ^4.0.0
++
++  '@csstools/css-color-parser@4.1.10':
++    resolution: {integrity: sha512-UZhQLIUyJaaMepqehrCODwCg2KW25vFvLWBmqYFaPclYvvxzj/sG8LBOhBFCp11i9uE7t1EyS+RAoV9tztPFyw==}
++    engines: {node: '>=20.19.0'}
++    peerDependencies:
++      '@csstools/css-parser-algorithms': ^4.0.0
++      '@csstools/css-tokenizer': ^4.0.0
++
++  '@csstools/css-parser-algorithms@4.0.0':
++    resolution: {integrity: sha512-+B87qS7fIG3L5h3qwJ/IFbjoVoOe/bpOdh9hAjXbvx0o8ImEmUsGXN0inFOnk2ChCFgqkkGFQ+TpM5rbhkKe4w==}
++    engines: {node: '>=20.19.0'}
++    peerDependencies:
++      '@csstools/css-tokenizer': ^4.0.0
++
++  '@csstools/css-syntax-patches-for-csstree@1.1.7':
++    resolution: {integrity: sha512-fQ+05118eQS1cofO3aJpB5efgpBZMvIzwr/sbC8kDLVA5XLG8q1kJV5yzrUAI1f7lvhPnm8fgIjzFB8/O/5Dig==}
++    peerDependencies:
++      css-tree: ^3.2.1
++    peerDependenciesMeta:
++      css-tree:
++        optional: true
++
++  '@csstools/css-tokenizer@4.0.0':
++    resolution: {integrity: sha512-QxULHAm7cNu72w97JUNCBFODFaXpbDg+dP8b/oWFAZ2MTRppA3U00Y2L1HqaS4J6yBqxwa/Y3nMBaxVKbB/NsA==}
++    engines: {node: '>=20.19.0'}
++
+   '@datadog/browser-core@6.33.0':
+     resolution: {integrity: sha512-h/xuBuY4Xi32CbBHkChMMWlOQ4al/mFF08x3o0hqrderfJvX7VO5tD3OVNwF+pfMXOGlDtBCIhwazr9sn24h3g==}
+ 
+@@ -964,6 +1031,15 @@ packages:
+     cpu: [x64]
+     os: [win32]
+ 
++  '@exodus/bytes@1.15.1':
++    resolution: {integrity: sha512-S6mL0yNB/Abt9Ei4tq8gDhcczc4S3+vQ4ra7vxnAf+YHC02srtqxKKZghx2Dq6p0e66THKwR6r8N6P95wEty7Q==}
++    engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
++    peerDependencies:
++      '@noble/hashes': ^1.8.0 || ^2.0.0
++    peerDependenciesMeta:
++      '@noble/hashes':
++        optional: true
++
+   '@faker-js/faker@10.5.0':
+     resolution: {integrity: sha512-bsxD8WLS5lIj7aaoCx1YJkktqYj5vlBUE6HWzu2Q51ksrGJ0H737ECCKlFU7Yf8Br45z9t99frBp/J7kzbMPAg==}
+     engines: {node: ^20.19.0 || ^22.13.0 || ^23.5.0 || >=24.0.0, npm: '>=10'}
+@@ -2143,6 +2219,37 @@ packages:
+     resolution: {integrity: sha512-JZlVFE6/dYpP9tQmV0/ADfn32L9uFarHWxfcRhReKUnljz1ZiUM5zpX+PH8h5CJs6lao3TuFqnPm9IJJCEkE2w==}
+     engines: {node: '>=10.8'}
+ 
++  '@testing-library/dom@10.4.1':
++    resolution: {integrity: sha512-o4PXJQidqJl82ckFaXUeoAW+XysPLauYI43Abki5hABd853iMhitooc6znOnczgbTYmEP6U6/y1ZyKAIsvMKGg==}
++    engines: {node: '>=18'}
++
++  '@testing-library/jest-dom@7.0.0':
++    resolution: {integrity: sha512-HKAH9C6mBo5yBG6yRO5i43L2iisencAo5z+o5P/saHUoY+miC5ivXRxHBJcFyB5ypPNxHJdK3BoF/3O4DIptMg==}
++    engines: {node: '>=22', npm: '>=6', yarn: '>=1'}
++    peerDependencies:
++      '@testing-library/dom': '>=10 <11'
++
++  '@testing-library/react@16.3.2':
++    resolution: {integrity: sha512-XU5/SytQM+ykqMnAnvB2umaJNIOsLF3PVv//1Ew4CTcpz0/BRyy/af40qqrt7SjKpDdT1saBMc42CUok5gaw+g==}
++    engines: {node: '>=18'}
++    peerDependencies:
++      '@testing-library/dom': ^10.0.0
++      '@types/react': ^18.0.0 || ^19.0.0
++      '@types/react-dom': ^18.0.0 || ^19.0.0
++      react: ^18.0.0 || ^19.0.0
++      react-dom: ^18.0.0 || ^19.0.0
++    peerDependenciesMeta:
++      '@types/react':
++        optional: true
++      '@types/react-dom':
++        optional: true
++
++  '@testing-library/user-event@14.6.1':
++    resolution: {integrity: sha512-vq7fv0rnt+QTXgPxr5Hjc210p6YKq2kmdziLgnsZGgLJ9e6VAShx1pACLuRjd/AS/sr7phAR58OIIpf0LlmQNw==}
++    engines: {node: '>=12', npm: '>=6'}
++    peerDependencies:
++      '@testing-library/dom': '>=7.21.4'
++
+   '@tokenizer/inflate@0.4.1':
+     resolution: {integrity: sha512-2mAv+8pkG6GIZiF1kNg1jAjh27IDxEPKwdGul3snfztFerfPGI1LjDezZp3i7BElXompqEtPmoPx6c2wgtWsOA==}
+     engines: {node: '>=18'}
+@@ -2156,6 +2263,9 @@ packages:
+   '@tybys/wasm-util@0.10.3':
+     resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
+ 
++  '@types/aria-query@5.0.4':
++    resolution: {integrity: sha512-rfT93uj5s0PRL7EzccGMs3brplhcrghnDoV26NqKhCAS1hVo+WdNsPvE/yb6ilfr5hi2MEk6d5EWJTKdxg8jVw==}
++
+   '@types/chai@5.2.3':
+     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
+ 
+@@ -2381,6 +2491,10 @@ packages:
+     resolution: {integrity: sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==}
+     engines: {node: '>=8'}
+ 
++  ansi-styles@5.2.0:
++    resolution: {integrity: sha512-Cxwpt2SfTzTtXcfOlzGEee8O+c+MmUgGrNiBcXnuWxuFJHe6a5Hz7qwhwe5OgaSYI0IJvkLqWX1ASG+cJOkEiA==}
++    engines: {node: '>=10'}
++
+   ansi-styles@6.2.3:
+     resolution: {integrity: sha512-4Dj6M28JB+oAH8kFkTLUo+a2jwOFkuqb3yucU0CANcRRUbxS0cP0nZYCGjcc3BNXwRIsUVmDGgzawme7zvJHvg==}
+     engines: {node: '>=12'}
+@@ -2392,6 +2506,13 @@ packages:
+   argparse@2.0.1:
+     resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
+ 
++  aria-query@5.3.0:
++    resolution: {integrity: sha512-b0P0sZPKtyu8HkeRAfCq0IfURZK+SuwMjY1UXGBU27wpAiTwQAIlq56IbIO+ytk/JjS1fMR14ee5WBBfKi5J6A==}
++
++  aria-query@5.3.2:
++    resolution: {integrity: sha512-COROpnaoap1E2F000S62r6A60uHZnmlvomhfyT2DlTcrY1OrBKn2UhH7qn5wTC9zMvD0AY7csdPSNwKP+7WiQw==}
++    engines: {node: '>= 0.4'}
++
+   array-buffer-byte-length@1.0.2:
+     resolution: {integrity: sha512-LHE+8BuR7RYGDKvnrmcuSq3tDcKv9OFEXQt/HpbZhY7V6h0zlUXutnAD82GiFx9rdieCMjkvtcsPqBwgUl1Iiw==}
+     engines: {node: '>= 0.4'}
+@@ -2464,6 +2585,9 @@ packages:
+     resolution: {integrity: sha512-bopVNp6ugyA150DDuZfPFdt1KZ5a94ZDiwX4hMgZDzF+GttD80lEy8kj98kbyhLXnPvhtIo93mdnLIjpCAeeOw==}
+     engines: {node: '>=10.0.0'}
+ 
++  bidi-js@1.0.3:
++    resolution: {integrity: sha512-RKshQI1R3YQ+n9YJz2QQ147P66ELpa1FQEg20Dk8oW9t2KgLbpDLLp9aGZ7y8WHSshDknG0bknqGw5/tyCs5tw==}
++
+   binary-extensions@2.3.0:
+     resolution: {integrity: sha512-Ceh+7ox5qe7LJuLHoY0feh3pHuUDHAcRUeyL2VYghZwfpkNIy/+8Ocg0a3UuSoYzavmylwuLWQOf3hl0jjMMIw==}
+     engines: {node: '>=8'}
+@@ -2617,6 +2741,13 @@ packages:
+   crc64-ecma182.js@2.0.2:
+     resolution: {integrity: sha512-mBItyEN8IYWic/bTU1EgLOSjIOdwe3H+arZ3gGp5FJRpN+eVAPPA5iEHGkPlTbRZCemHb1zLJigQ4HXjUb7jAg==}
+ 
++  css-tree@3.2.1:
++    resolution: {integrity: sha512-X7sjQzceUhu1u7Y/ylrRZFU2FS6LRiFVp6rKLPg23y3x3c3DOKAwuXGDp+PAGjh6CSnCjYeAul8pcT8bAl+lSA==}
++    engines: {node: ^10 || ^12.20.0 || ^14.13.0 || >=15.0.0}
++
++  css.escape@1.5.1:
++    resolution: {integrity: sha512-YUifsXXuknHlUsmlgyY0PKzgPOr7/FjCePfHNt0jxm83wHZi44VDMQ7/fGNkjY3/jV1MC+1CmZbaHzugyeRtpg==}
++
+   csstype@3.2.3:
+     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
+ 
+@@ -2627,6 +2758,10 @@ packages:
+     resolution: {integrity: sha512-6UHfyCux51b8PTGDgveqtz1tvphBku5DrMKKJbFAZAJOI2zsjDpDoYE1+QGj7FOMS4BdTFNJsJiR3zEB0xH0yQ==}
+     engines: {node: '>= 20'}
+ 
++  data-urls@7.0.0:
++    resolution: {integrity: sha512-23XHcCF+coGYevirZceTVD7NdJOqVn+49IHyxgszm+JIiHLoB2TkmPtsYkNWT1pvRSGkc35L6NHs0yHkN2SumA==}
++    engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
++
+   data-view-buffer@1.0.2:
+     resolution: {integrity: sha512-EmKO5V3OLXh1rtK2wgXRansaK1/mtVdTUEiEI0W8RkvgT05kfxaH29PliLnpLP73yYO6142Q72QNa8Wx/A5CqQ==}
+     engines: {node: '>= 0.4'}
+@@ -2659,6 +2794,9 @@ packages:
+       supports-color:
+         optional: true
+ 
++  decimal.js@10.6.0:
++    resolution: {integrity: sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==}
++
+   defaults@1.0.4:
+     resolution: {integrity: sha512-eFuaLoy/Rxalv2kr+lqMlUnrDWV+3j4pljOIJgLIhI058IQfWJ7vXhyEIHu+HtC738klGALYxOKDO0bQP3tg8A==}
+ 
+@@ -2699,6 +2837,12 @@ packages:
+   devtools-protocol@0.0.1653615:
+     resolution: {integrity: sha512-pGVkY3T/qXxAp2nFPodwYqOevk6ncNMSmvL8QfRCx5ZWGd6Vor7AFNmyaA8Zs6uJyP1QAfjuLandCgvSix1BNA==}
+ 
++  dom-accessibility-api@0.5.16:
++    resolution: {integrity: sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==}
++
++  dom-accessibility-api@0.6.3:
++    resolution: {integrity: sha512-7ZgogeTnjuHbo+ct10G9Ffp0mif17idi0IyWNVA/wcwcm7NPOD/WEHVP3n7n3MhXqxoIYm8d6MuZohYWIZ4T3w==}
++
+   dunder-proto@1.0.1:
+     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
+     engines: {node: '>= 0.4'}
+@@ -2721,6 +2865,10 @@ packages:
+   end-of-stream@1.4.5:
+     resolution: {integrity: sha512-ooEGc6HP26xXq/N+GCGOT0JKCLDGrq2bQUZrQ7gyrJiZANJ/8YDTxTpQBXGMn+WbIQXNVpyWymm7KYVICQnyOg==}
+ 
++  entities@8.0.0:
++    resolution: {integrity: sha512-zwfzJecQ/Uej6tusMqwAqU/6KL2XaB2VZ2Jg54Je6ahNBGNH6Ek6g3jjNCF0fG9EWQKGZNddNjU5F1ZQn/sBnA==}
++    engines: {node: '>=20.19.0'}
++
+   es-abstract@1.24.1:
+     resolution: {integrity: sha512-zHXBLhP+QehSSbsS9Pt23Gg964240DPd6QCf8WpkqEXxQ7fhdZzYsocOr5u7apWonsS5EjZDmTF+/slGMyasvw==}
+     engines: {node: '>= 0.4'}
+@@ -3032,6 +3180,10 @@ packages:
+     resolution: {integrity: sha512-A91dYTeIB6NoXG+PxTQpCCDDnfHsW9kc06Lvpu1TEe9gnd6ZFeiBoRO9JvzEv6xK7EX97/dUE8g/vBMTqTS3CA==}
+     engines: {node: '>=14'}
+ 
++  html-encoding-sniffer@6.0.0:
++    resolution: {integrity: sha512-CV9TW3Y3f8/wT0BRFc1/KAVQ3TUHiXmaAb6VW9vtiMFf7SLoMd1PdAc4W3KFOFETBJUb90KatHqlsZMWV+R9Gg==}
++    engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
++
+   html-escaper@2.0.2:
+     resolution: {integrity: sha512-H2iMtd0I4Mt5eYiapRdIDjp+XzelXQ0tFE4JS7YFwFevXXMmOp9myNrUvCg0D6ws8iqkRPBfKHgbwig1SmlLfg==}
+ 
+@@ -3071,6 +3223,10 @@ packages:
+     resolution: {integrity: sha512-jTd2FfOgOWOdgjkHuk/1Ms8VKFXkPs15ymYBETw1sAOrO/dY3XeGVRWir9qBbw7pXr0T2eTFwfCZ+N02HmiNGA==}
+     engines: {node: '>=18'}
+ 
++  indent-string@4.0.0:
++    resolution: {integrity: sha512-EdDDZu4A2OyIK7Lr/2zG+w5jmbuk1DVBnEwREQvBzspBJkCEbRa8GxU1lghYcaGJCnRWibjDXlq779X1/y5xwg==}
++    engines: {node: '>=8'}
++
+   index-to-position@1.2.0:
+     resolution: {integrity: sha512-Yg7+ztRkqslMAS2iFaU+Oa4KTSidr63OsFGlOrJoW981kIYO3CGCS3wA95P1mUi/IVSJkn0D479KTJpVpvFNuw==}
+     engines: {node: '>=18'}
+@@ -3166,6 +3322,9 @@ packages:
+     resolution: {integrity: sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==}
+     engines: {node: '>=0.12.0'}
+ 
++  is-potential-custom-element-name@1.0.1:
++    resolution: {integrity: sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==}
++
+   is-reference@1.2.1:
+     resolution: {integrity: sha512-U82MsXXiFIrjCK4otLT+o2NA2Cd2g5MLoOVXUZjIOhLurrRxpEXzI8O0KZHr3IjLvlAH1kTPYSuqer5T9ZVBKQ==}
+ 
+@@ -3249,6 +3408,15 @@ packages:
+     resolution: {integrity: sha512-1td788aAnnZ5qs7V2QIRl1owjtYpbKt749Y3xauqQgwIIGF/xXWz1wMTEBx5O3LK3lXLVuqXPdPxj2BoFHaW9Q==}
+     hasBin: true
+ 
++  jsdom@30.0.1:
++    resolution: {integrity: sha512-52v7mUVUfNQVYYqE1lcdaymWL0njO7lTLUog6ZvW2U5KsbiLk/GnZlVJ+qx0xfNJZ6Gn+KSpPNE52vurbxZwrA==}
++    engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
++    peerDependencies:
++      canvas: ^3.2.3
++    peerDependenciesMeta:
++      canvas:
++        optional: true
++
+   jsep@1.4.0:
+     resolution: {integrity: sha512-B7qPcEVE3NVkmSJbaYxvv4cHkVW7DQsZz13pUMrfS8z8Q/BuShN+gcTXrUlPiGqM2/t/EEaI030bpxMqY8gMlw==}
+     engines: {node: '>= 10.16.0'}
+@@ -3425,6 +3593,10 @@ packages:
+     resolution: {integrity: sha512-aY/R+aEsRelme17KGQa/1ZSIpLpNYYrhcrepKTZgE+W3WM16YMCaPwOHLHsmopZHELU0Ojin1lPVxKR0MihncA==}
+     engines: {node: 20 || >=22}
+ 
++  lru-cache@11.5.2:
++    resolution: {integrity: sha512-4pfM1Ff0x50o0tQwb5ucw/RzNyD0/YJME6IVcStalZuMWxdt3sR3huStTtxz4PUmvZfRguvDejasvQ2kifR11g==}
++    engines: {node: 20 || >=22}
++
+   lru-cache@6.0.0:
+     resolution: {integrity: sha512-Jo6dJ04CmSjuznwJSS3pUeWmd/H0ffTlkXXgwZi+eq1UCmqQwCh+eLsYOYCwY991i2Fah4h1BEMCx4qThGbsiA==}
+     engines: {node: '>=10'}
+@@ -3433,6 +3605,10 @@ packages:
+     resolution: {integrity: sha512-jumlc0BIUrS3qJGgIkWZsyfAM7NCWiBcCDhnd+3NNM5KbBmLTgHVfWBcg6W+rLUsIpzpERPsvwUP7CckAQSOoA==}
+     engines: {node: '>=12'}
+ 
++  lz-string@1.5.0:
++    resolution: {integrity: sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==}
++    hasBin: true
++
+   magic-string@0.25.9:
+     resolution: {integrity: sha512-RmF0AsMzgt25qzqqLc1+MbHmhdx0ojF2Fvs4XnOqz2ZOBXzzkEwc/dJQZCYHAn7v1jbVOjAZfK8msRn4BxO4VQ==}
+ 
+@@ -3453,6 +3629,9 @@ packages:
+     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
+     engines: {node: '>= 0.4'}
+ 
++  mdn-data@2.27.1:
++    resolution: {integrity: sha512-9Yubnt3e8A0OKwxYSXyhLymGW4sCufcLG6VdiDdUGVkPhpqLxlvP5vl1983gQjJl3tqbrM731mjaZaP68AgosQ==}
++
+   merge2@1.4.1:
+     resolution: {integrity: sha512-8q7VEgMJW4J8tcfVPy8g09NcQwZdbwFEqhe/WZkoIzjn/3TGDwtOCYtXGxA3O8tPzpczCCDgv+P2P5y00ZJOOg==}
+     engines: {node: '>= 8'}
+@@ -3474,6 +3653,10 @@ packages:
+     engines: {node: '>=10.0.0'}
+     hasBin: true
+ 
++  min-indent@1.0.1:
++    resolution: {integrity: sha512-I9jwMn07Sy/IwOj3zVkVik2JTvgpaykDZEigL6Rx6N9LbMywwUSMtxET+7lVoDLLd3O3IXwJwvuuns8UB/HeAg==}
++    engines: {node: '>=4'}
++
+   minimatch@10.2.5:
+     resolution: {integrity: sha512-MULkVLfKGYDFYejP07QOurDLLQpcjk7Fw+7jXS2R2czRQzR56yHRveU5NDJEOviH+hETZKSkIk5c+T23GjFUMg==}
+     engines: {node: 18 || 20 || >=22}
+@@ -3629,6 +3812,9 @@ packages:
+     resolution: {integrity: sha512-ybiGyvspI+fAoRQbIPRddCcSTV9/LsJbf0e/S85VLowVGzRmokfneg2kwVW/KU5rOXrPSbF1qAKPMgNTqqROQQ==}
+     engines: {node: '>=18'}
+ 
++  parse5@8.0.1:
++    resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
++
+   path-is-absolute@1.0.1:
+     resolution: {integrity: sha512-AVbw3UJ2e9bq64vSaS9Am0fje1Pa8pbGqTTsmXfaIiMpnr5DlDhfJOuLj9Sf95ZPVDAUerDfEk88MPmPe7UCQg==}
+     engines: {node: '>=0.10.0'}
+@@ -3703,6 +3889,10 @@ packages:
+   pprof-format@2.3.0:
+     resolution: {integrity: sha512-ovChRLoV4H3k0zKWq0AXewtnuPGskzBLjBPmF2N0DZu+H65PYuo51+6e/1GTb8Olm7oC0xvhhLdqPL4/XhCl4A==}
+ 
++  pretty-format@27.5.1:
++    resolution: {integrity: sha512-Qb1gy5OrP5+zDf2Bvnzdl3jsTf1qXVMazbvCoKhtKqVs4/YK4ozX4gKQJJVyNe+cajNPn0KoC0MC3FUmaHWEmQ==}
++    engines: {node: ^10.13.0 || ^12.13.0 || ^14.15.0 || >=15.0.0}
++
+   printable-characters@1.0.42:
+     resolution: {integrity: sha512-dKp+C4iXWK4vVYZmYSd0KBH5F/h1HoZRsbJ82AVKRO3PEo8L4lBS/vLwhVtpwwuYcoIsVY+1JYKR268yn480uQ==}
+ 
+@@ -3739,6 +3929,10 @@ packages:
+   pump@3.0.4:
+     resolution: {integrity: sha512-VS7sjc6KR7e1ukRFhQSY5LM2uBWAUPiOPa/A3mkKmiMwSmRFUITt0xuj+/lesgnCv+dPIEYlkzrcyXgquIHMcA==}
+ 
++  punycode@2.3.1:
++    resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
++    engines: {node: '>=6'}
++
+   puppeteer-core@25.4.0:
+     resolution: {integrity: sha512-K1plkLOdeoUnGeT1OvdqF3qxl33v+Ra/uH5VyPEhXdMcpvGiEskHzxxEU3fgpccJpJLIipB/rPUsvkZRWeKqOA==}
+     engines: {node: '>=22.12.0'}
+@@ -3762,6 +3956,9 @@ packages:
+     peerDependencies:
+       react: ^19.2.8
+ 
++  react-is@17.0.2:
++    resolution: {integrity: sha512-w2GsyukL62IJnlaff/nRegPQR94C/XXamvMWmSHRJ4y7Ts/4ocGRmTHvOs8PSE6pB3dWOrD/nueuU5sduBsQ4w==}
++
+   react@19.2.8:
+     resolution: {integrity: sha512-PWaYA1L/q9u2u7xYQi+Y3L3Yfnie7XyLeaJICV1MGD6LprsBxcAqGjYyr0eY3p+QdsA+x/Irkt4Qif8D63+Sbw==}
+     engines: {node: '>=0.10.0'}
+@@ -3777,6 +3974,10 @@ packages:
+   real-require@1.0.0:
+     resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
+ 
++  redent@3.0.0:
++    resolution: {integrity: sha512-6tDA8g98We0zd0GvVeMT9arEOnTw9qM03L9cJXaCjrip1OO764RDBLBfrB4cwzNGDj5OA5ioymC9GkizgWJDUg==}
++    engines: {node: '>=8'}
++
+   reflect-metadata@0.2.2:
+     resolution: {integrity: sha512-urBwgfrvVP/eAyXx4hluJivBKzuEbSQs9rKWCrCkbSxNv8mxPcUZKeuoF3Uy4mJl3Lwprp6yy5/39VWigZ4K6Q==}
+ 
+@@ -3874,6 +4075,10 @@ packages:
+     resolution: {integrity: sha512-b3rppTKm9T+PsVCBEOUR46GWI7fdOs00VKZ1+9c1EWDaDMvjQc6tUwuFyIprgGgTcWoVHSKrU8H31ZHA2e0RHA==}
+     engines: {node: '>=10'}
+ 
++  saxes@6.0.0:
++    resolution: {integrity: sha512-xAg7SOnEhrm5zI3puOOKyy1OMcMlIJZYNJY7xLBwSze0UjhPLnWfj2GF2EpT0jmzaJKIWKHLsaSSajf35bcYnA==}
++    engines: {node: '>=v12.22.7'}
++
+   scheduler@0.27.0:
+     resolution: {integrity: sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q==}
+ 
+@@ -4037,6 +4242,10 @@ packages:
+     resolution: {integrity: sha512-yDPMNjp4WyfYBkHnjIRLfca1i6KMyGCtsVgoKe/z1+6vukgaENdgGBZt+ZmKPc4gavvEZ5OgHfHdrazhgNyG7w==}
+     engines: {node: '>=12'}
+ 
++  strip-indent@3.0.0:
++    resolution: {integrity: sha512-laJTa3Jb+VQpaC6DseHhF7dXVqHTfJPCRDaEbid/drOhgitgYku/letMUqOXFoWV0zIIUbjpdH2t+tYj4bQMRQ==}
++    engines: {node: '>=8'}
++
+   strip-json-comments@5.0.3:
+     resolution: {integrity: sha512-1tB5mhVo7U+ETBKNf92xT4hrQa3pm0MZ0PQvuDnWgAAGHDsfp4lPSpiS6psrSiet87wyGPh9ft6wmhOMQ0hDiw==}
+     engines: {node: '>=14.16'}
+@@ -4061,6 +4270,9 @@ packages:
+     resolution: {integrity: sha512-ot0WnXS9fgdkgIcePe6RHNk1WA8+muPa6cSjeR3V8K27q9BB1rTE3R1p7Hv0z1ZyAc8s6Vvv8DIyWf681MAt0w==}
+     engines: {node: '>= 0.4'}
+ 
++  symbol-tree@3.2.4:
++    resolution: {integrity: sha512-9QNk5KwDF+Bvz+PyObkmSYjI5ksVUYtjW7AU22r2NKcfLJcXp96hkDWU3+XndOsUb+AQ9QhfzfCT2O+CNWT5Tw==}
++
+   text-table@0.2.0:
+     resolution: {integrity: sha512-N+8UisAXDGk8PFXP4HAzVR9nbfmVJ3zYLAWiTIoqC5v5isinhr+r5uaO8+7r3BMfuNIufIsA7RdpVgacC2cSpw==}
+ 
+@@ -4087,6 +4299,13 @@ packages:
+     resolution: {integrity: sha512-Bf+ILmBgretUrdJxzXM0SgXLZ3XfiaUuOj/IKQHuTXip+05Xn+uyEYdVg0kYDipTBcLrCVyUzAPz7QmArb0mmw==}
+     engines: {node: '>=14.0.0'}
+ 
++  tldts-core@7.4.10:
++    resolution: {integrity: sha512-KnQjp53ZekKgm/r3l+u8kJGGzYgrWdP8+Mql7a4vijh2WE0IrZWspQj/TpTxDho/YxO+AnOZnIjQcCD+q6iJsw==}
++
++  tldts@7.4.10:
++    resolution: {integrity: sha512-GgouD1B+sWwvkaEq8vXC15DjQitxbvs12oIXELpconwm+Tg3zfcEv4jgzq3vtKverDXsg3VI8aRgNL2Nra0Iog==}
++    hasBin: true
++
+   to-regex-range@5.0.1:
+     resolution: {integrity: sha512-65P7iz6X5yEr1cwcgvQxbbIw7Uk3gOy5dIdtZ4rDveLqhrdJP+Li/Hx6tyK0NEb+2GCyneCMJiGqrADCSNk8sQ==}
+     engines: {node: '>=8.0'}
+@@ -4111,9 +4330,17 @@ packages:
+     resolution: {integrity: sha512-r0eojU4bI8MnHr8c5bNo7lJDdI2qXlWWJk6a9EAFG7vbhTjElYhBVS3/miuE0uOuoLdb8Mc/rVfsmm6eo5o9GA==}
+     hasBin: true
+ 
++  tough-cookie@6.0.2:
++    resolution: {integrity: sha512-exgYmnmL/sJpR3upZfXG5PoatXQii55xAiXGXzY+sROLZ/Y+SLcp9PgJNI9Vz37HpQ74WvDcLT8eqm+kV3FzrA==}
++    engines: {node: '>=16'}
++
+   tr46@0.0.3:
+     resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}
+ 
++  tr46@6.0.0:
++    resolution: {integrity: sha512-bLVMLPtstlZ4iMQHpFHTR7GAGj2jxi8Dg0s2h2MafAE4uSWF98FC/3MomU51iQAMf8/qDUbKWf5GxuvvVcXEhw==}
++    engines: {node: '>=20'}
++
+   tree-kill@1.2.2:
+     resolution: {integrity: sha512-L0Orpi8qGpRG//Nd+H90vFB+3iHnue1zSSGmNOOCh1GLJ7rUKVwV2HvijphGQS2UmhUZewS9VgvxYIdgr+fG1A==}
+     hasBin: true
+@@ -4185,6 +4412,10 @@ packages:
+   undici-types@8.3.0:
+     resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
+ 
++  undici@8.9.0:
++    resolution: {integrity: sha512-aWZpUj7XoGonMClx4gdDRfgBjqeA+F473aDmROQQbM9n6PRfK/u1q/a0X4wMTgcHfT8H6fpbt98PFuDUwFg2YA==}
++    engines: {node: '>=22.19.0'}
++
+   universalify@2.0.1:
+     resolution: {integrity: sha512-gptHNQghINnc/vTGIk0SOFGFNXw7JVrlRUtConJRlvaw6DuX0wO5Jeko9sWrMBhh+PsYAZ7oXAiOnf/UKogyiw==}
+     engines: {node: '>= 10.0.0'}
+@@ -4322,6 +4553,10 @@ packages:
+       jsdom:
+         optional: true
+ 
++  w3c-xmlserializer@5.0.0:
++    resolution: {integrity: sha512-o8qghlI8NZHU1lLPrpi2+Uq7abh4GGPpYANlalzWxyWteJOCsr/P+oPBA49TOLu5FTZO4d3F9MnWJfiMo4BkmA==}
++    engines: {node: '>=18'}
++
+   wcwidth@1.0.1:
+     resolution: {integrity: sha512-XHPEwS0q6TaxcvG85+8EYkbiCux2XtWG2mkc47Ng2A77BQu9+DqIOJldST4HgPkuea7dvKSj5VgX3P1d4rW8Tg==}
+ 
+@@ -4331,6 +4566,22 @@ packages:
+   webidl-conversions@3.0.1:
+     resolution: {integrity: sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ==}
+ 
++  webidl-conversions@8.0.1:
++    resolution: {integrity: sha512-BMhLD/Sw+GbJC21C/UgyaZX41nPt8bUTg+jWyDeg7e7YN4xOM05YPSIXceACnXVtqyEw/LMClUQMtMZ+PGGpqQ==}
++    engines: {node: '>=20'}
++
++  whatwg-mimetype@5.0.0:
++    resolution: {integrity: sha512-sXcNcHOC51uPGF0P/D4NVtrkjSU2fNsm9iog4ZvZJsL3rjoDAzXZhkm2MWt1y+PUdggKAYVoMAIYcs78wJ51Cw==}
++    engines: {node: '>=20'}
++
++  whatwg-url@16.0.1:
++    resolution: {integrity: sha512-1to4zXBxmXHV3IiSSEInrreIlu02vUOvrhxJJH5vcxYTBDAx51cqZiKdyTxlecdKNSjj8EcxGBxNf6Vg+945gw==}
++    engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
++
++  whatwg-url@17.1.0:
++    resolution: {integrity: sha512-3GeworPmc2ZfEEHP7lEbUfBX/L75wdEsi0rLNhXcXxnoN5jyq0SL5gCy06SGW2cyTIZdTvWIDQNQoza++vKeaw==}
++    engines: {node: ^22.14.0 || >=24.0.0}
++
+   whatwg-url@5.0.0:
+     resolution: {integrity: sha512-saE57nupxk6v3HY35+jzBwYa0rKSy0XR8JSxZPwgLr7ys0IBzhGviA1/TUGJLmSVqs8pb9AnvICXEuOHLprYTw==}
+ 
+@@ -4382,6 +4633,13 @@ packages:
+       utf-8-validate:
+         optional: true
+ 
++  xml-name-validator@5.0.0:
++    resolution: {integrity: sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==}
++    engines: {node: '>=18'}
++
++  xmlchars@2.2.0:
++    resolution: {integrity: sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==}
++
+   y18n@5.0.8:
+     resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
+     engines: {node: '>=10'}
+@@ -4433,6 +4691,23 @@ packages:
+ 
+ snapshots:
+ 
++  '@adobe/css-tools@4.5.0': {}
++
++  '@asamuzakjp/css-color@6.0.5':
++    dependencies:
++      '@csstools/css-calc': 3.3.0(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)
++      '@csstools/css-color-parser': 4.1.10(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)
++      '@csstools/css-parser-algorithms': 4.0.0(@csstools/css-tokenizer@4.0.0)
++      '@csstools/css-tokenizer': 4.0.0
++      lru-cache: 11.5.2
++
++  '@asamuzakjp/dom-selector@8.3.0':
++    dependencies:
++      bidi-js: 1.0.3
++      css-tree: 3.2.1
++      is-potential-custom-element-name: 1.0.1
++      lru-cache: 11.5.2
++
+   '@asyncapi/specs@6.10.0':
+     dependencies:
+       '@types/json-schema': 7.0.15
+@@ -4892,6 +5167,8 @@ snapshots:
+     dependencies:
+       '@babel/types': 8.0.4
+ 
++  '@babel/runtime@7.29.7': {}
++
+   '@babel/template@7.29.7':
+     dependencies:
+       '@babel/code-frame': 7.29.7
+@@ -4958,6 +5235,34 @@ snapshots:
+ 
+   '@borewit/text-codec@0.2.2': {}
+ 
++  '@bramus/specificity@2.4.2':
++    dependencies:
++      css-tree: 3.2.1
++
++  '@csstools/color-helpers@6.1.0': {}
++
++  '@csstools/css-calc@3.3.0(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)':
++    dependencies:
++      '@csstools/css-parser-algorithms': 4.0.0(@csstools/css-tokenizer@4.0.0)
++      '@csstools/css-tokenizer': 4.0.0
++
++  '@csstools/css-color-parser@4.1.10(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)':
++    dependencies:
++      '@csstools/color-helpers': 6.1.0
++      '@csstools/css-calc': 3.3.0(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)
++      '@csstools/css-parser-algorithms': 4.0.0(@csstools/css-tokenizer@4.0.0)
++      '@csstools/css-tokenizer': 4.0.0
++
++  '@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0)':
++    dependencies:
++      '@csstools/css-tokenizer': 4.0.0
++
++  '@csstools/css-syntax-patches-for-csstree@1.1.7(css-tree@3.2.1)':
++    optionalDependencies:
++      css-tree: 3.2.1
++
++  '@csstools/css-tokenizer@4.0.0': {}
++
+   '@datadog/browser-core@6.33.0': {}
+ 
+   '@datadog/browser-rum-core@6.33.0':
+@@ -5124,6 +5429,8 @@ snapshots:
+   '@esbuild/win32-x64@0.28.1':
+     optional: true
+ 
++  '@exodus/bytes@1.15.1': {}
++
+   '@faker-js/faker@10.5.0': {}
+ 
+   '@fastify/accept-negotiator@2.0.1': {}
+@@ -6664,6 +6971,41 @@ snapshots:
+       '@stoplight/yaml-ast-parser': 0.0.50
+       tslib: 2.8.1
+ 
++  '@testing-library/dom@10.4.1':
++    dependencies:
++      '@babel/code-frame': 7.29.7
++      '@babel/runtime': 7.29.7
++      '@types/aria-query': 5.0.4
++      aria-query: 5.3.0
++      dom-accessibility-api: 0.5.16
++      lz-string: 1.5.0
++      picocolors: 1.1.1
++      pretty-format: 27.5.1
++
++  '@testing-library/jest-dom@7.0.0(@testing-library/dom@10.4.1)':
++    dependencies:
++      '@adobe/css-tools': 4.5.0
++      '@testing-library/dom': 10.4.1
++      aria-query: 5.3.2
++      css.escape: 1.5.1
++      dom-accessibility-api: 0.6.3
++      picocolors: 1.1.1
++      redent: 3.0.0
++
++  '@testing-library/react@16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
++    dependencies:
++      '@babel/runtime': 7.29.7
++      '@testing-library/dom': 10.4.1
++      react: 19.2.8
++      react-dom: 19.2.8(react@19.2.8)
++    optionalDependencies:
++      '@types/react': 19.2.17
++      '@types/react-dom': 19.2.3(@types/react@19.2.17)
++
++  '@testing-library/user-event@14.6.1(@testing-library/dom@10.4.1)':
++    dependencies:
++      '@testing-library/dom': 10.4.1
++
+   '@tokenizer/inflate@0.4.1':
+     dependencies:
+       debug: 4.4.3
+@@ -6680,6 +7022,8 @@ snapshots:
+       tslib: 2.8.1
+     optional: true
+ 
++  '@types/aria-query@5.0.4': {}
++
+   '@types/chai@5.2.3':
+     dependencies:
+       '@types/deep-eql': 4.0.2
+@@ -6754,7 +7098,7 @@ snapshots:
+       obug: 2.1.1
+       std-env: 4.0.0
+       tinyrainbow: 3.1.0
+-      vitest: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++      vitest: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+     optional: true
+ 
+   '@vitest/coverage-v8@4.1.10(vitest@4.1.2)':
+@@ -6769,7 +7113,7 @@ snapshots:
+       obug: 2.1.1
+       std-env: 4.0.0
+       tinyrainbow: 3.1.0
+-      vitest: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++      vitest: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+ 
+   '@vitest/expect@4.1.10':
+     dependencies:
+@@ -6858,7 +7202,7 @@ snapshots:
+       sirv: 3.0.2
+       tinyglobby: 0.2.17
+       tinyrainbow: 3.1.0
+-      vitest: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++      vitest: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+     optional: true
+ 
+   '@vitest/ui@4.1.10(vitest@4.1.2)':
+@@ -6870,7 +7214,7 @@ snapshots:
+       sirv: 3.0.2
+       tinyglobby: 0.2.17
+       tinyrainbow: 3.1.0
+-      vitest: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++      vitest: 4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+ 
+   '@vitest/utils@4.1.10':
+     dependencies:
+@@ -6943,6 +7287,8 @@ snapshots:
+     dependencies:
+       color-convert: 2.0.1
+ 
++  ansi-styles@5.2.0: {}
++
+   ansi-styles@6.2.3: {}
+ 
+   anymatch@3.1.3:
+@@ -6952,6 +7298,12 @@ snapshots:
+ 
+   argparse@2.0.1: {}
+ 
++  aria-query@5.3.0:
++    dependencies:
++      dequal: 2.0.3
++
++  aria-query@5.3.2: {}
++
+   array-buffer-byte-length@1.0.2:
+     dependencies:
+       call-bound: 1.0.4
+@@ -7034,6 +7386,10 @@ snapshots:
+ 
+   basic-ftp@5.3.1: {}
+ 
++  bidi-js@1.0.3:
++    dependencies:
++      require-from-string: 2.0.2
++
+   binary-extensions@2.3.0: {}
+ 
+   bowser@2.14.1: {}
+@@ -7183,12 +7539,26 @@ snapshots:
+ 
+   crc64-ecma182.js@2.0.2: {}
+ 
++  css-tree@3.2.1:
++    dependencies:
++      mdn-data: 2.27.1
++      source-map-js: 1.2.1
++
++  css.escape@1.5.1: {}
++
+   csstype@3.2.3: {}
+ 
+   data-uri-to-buffer@2.0.2: {}
+ 
+   data-uri-to-buffer@8.0.0: {}
+ 
++  data-urls@7.0.0:
++    dependencies:
++      whatwg-mimetype: 5.0.0
++      whatwg-url: 16.0.1
++    transitivePeerDependencies:
++      - '@noble/hashes'
++
+   data-view-buffer@1.0.2:
+     dependencies:
+       call-bound: 1.0.4
+@@ -7246,6 +7616,8 @@ snapshots:
+     optionalDependencies:
+       supports-color: 5.5.0
+ 
++  decimal.js@10.6.0: {}
++
+   defaults@1.0.4:
+     dependencies:
+       clone: 1.0.4
+@@ -7282,6 +7654,10 @@ snapshots:
+ 
+   devtools-protocol@0.0.1653615: {}
+ 
++  dom-accessibility-api@0.5.16: {}
++
++  dom-accessibility-api@0.6.3: {}
++
+   dunder-proto@1.0.1:
+     dependencies:
+       call-bind-apply-helpers: 1.0.2
+@@ -7312,6 +7688,8 @@ snapshots:
+     dependencies:
+       once: 1.4.0
+ 
++  entities@8.0.0: {}
++
+   es-abstract@1.24.1:
+     dependencies:
+       array-buffer-byte-length: 1.0.2
+@@ -7718,6 +8096,12 @@ snapshots:
+ 
+   hpagent@1.2.0: {}
+ 
++  html-encoding-sniffer@6.0.0:
++    dependencies:
++      '@exodus/bytes': 1.15.1
++    transitivePeerDependencies:
++      - '@noble/hashes'
++
+   html-escaper@2.0.2: {}
+ 
+   http-errors@2.0.1:
+@@ -7786,6 +8170,8 @@ snapshots:
+       es-module-lexer: 2.3.1
+       module-details-from-path: 1.0.4
+ 
++  indent-string@4.0.0: {}
++
+   index-to-position@1.2.0: {}
+ 
+   inflight@1.0.6:
+@@ -7880,6 +8266,8 @@ snapshots:
+ 
+   is-number@7.0.0: {}
+ 
++  is-potential-custom-element-name@1.0.1: {}
++
+   is-reference@1.2.1:
+     dependencies:
+       '@types/estree': 1.0.8
+@@ -7959,6 +8347,32 @@ snapshots:
+       argparse: 2.0.1
+     optional: true
+ 
++  jsdom@30.0.1:
++    dependencies:
++      '@asamuzakjp/css-color': 6.0.5
++      '@asamuzakjp/dom-selector': 8.3.0
++      '@bramus/specificity': 2.4.2
++      '@csstools/css-syntax-patches-for-csstree': 1.1.7(css-tree@3.2.1)
++      '@exodus/bytes': 1.15.1
++      css-tree: 3.2.1
++      data-urls: 7.0.0
++      decimal.js: 10.6.0
++      html-encoding-sniffer: 6.0.0
++      is-potential-custom-element-name: 1.0.1
++      lru-cache: 11.5.2
++      parse5: 8.0.1
++      saxes: 6.0.0
++      symbol-tree: 3.2.4
++      tough-cookie: 6.0.2
++      undici: 8.9.0
++      w3c-xmlserializer: 5.0.0
++      webidl-conversions: 8.0.1
++      whatwg-mimetype: 5.0.0
++      whatwg-url: 17.1.0
++      xml-name-validator: 5.0.0
++    transitivePeerDependencies:
++      - '@noble/hashes'
++
+   jsep@1.4.0: {}
+ 
+   json-schema-ref-resolver@3.0.0:
+@@ -8106,12 +8520,16 @@ snapshots:
+ 
+   lru-cache@11.2.7: {}
+ 
++  lru-cache@11.5.2: {}
++
+   lru-cache@6.0.0:
+     dependencies:
+       yallist: 4.0.0
+ 
+   lru-cache@7.18.3: {}
+ 
++  lz-string@1.5.0: {}
++
+   magic-string@0.25.9:
+     dependencies:
+       sourcemap-codec: 1.4.8
+@@ -8134,6 +8552,8 @@ snapshots:
+ 
+   math-intrinsics@1.1.0: {}
+ 
++  mdn-data@2.27.1: {}
++
+   merge2@1.4.1: {}
+ 
+   micromatch@4.0.8:
+@@ -8149,6 +8569,8 @@ snapshots:
+ 
+   mime@3.0.0: {}
+ 
++  min-indent@1.0.1: {}
++
+   minimatch@10.2.5:
+     dependencies:
+       brace-expansion: 5.0.5
+@@ -8331,6 +8753,10 @@ snapshots:
+       index-to-position: 1.2.0
+       type-fest: 4.41.0
+ 
++  parse5@8.0.1:
++    dependencies:
++      entities: 8.0.0
++
+   path-is-absolute@1.0.1: {}
+ 
+   path-parse@1.0.7: {}
+@@ -8412,6 +8838,12 @@ snapshots:
+   pprof-format@2.3.0:
+     optional: true
+ 
++  pretty-format@27.5.1:
++    dependencies:
++      ansi-regex: 5.0.1
++      ansi-styles: 5.2.0
++      react-is: 17.0.2
++
+   printable-characters@1.0.42: {}
+ 
+   process-warning@4.0.1: {}
+@@ -8457,6 +8889,8 @@ snapshots:
+       end-of-stream: 1.4.5
+       once: 1.4.0
+ 
++  punycode@2.3.1: {}
++
+   puppeteer-core@25.4.0(proxy-agent@8.0.2):
+     dependencies:
+       '@puppeteer/browsers': 3.0.6(proxy-agent@8.0.2)
+@@ -8496,6 +8930,8 @@ snapshots:
+       react: 19.2.8
+       scheduler: 0.27.0
+ 
++  react-is@17.0.2: {}
++
+   react@19.2.8: {}
+ 
+   readdirp@3.6.0:
+@@ -8506,6 +8942,11 @@ snapshots:
+ 
+   real-require@1.0.0: {}
+ 
++  redent@3.0.0:
++    dependencies:
++      indent-string: 4.0.0
++      strip-indent: 3.0.0
++
+   reflect-metadata@0.2.2: {}
+ 
+   reflect.getprototypeof@1.0.10:
+@@ -8627,6 +9068,10 @@ snapshots:
+ 
+   safe-stable-stringify@2.5.0: {}
+ 
++  saxes@6.0.0:
++    dependencies:
++      xmlchars: 2.2.0
++
+   scheduler@0.27.0: {}
+ 
+   secure-json-parse@4.1.0: {}
+@@ -8810,6 +9255,10 @@ snapshots:
+     dependencies:
+       ansi-regex: 6.2.2
+ 
++  strip-indent@3.0.0:
++    dependencies:
++      min-indent: 1.0.1
++
+   strip-json-comments@5.0.3: {}
+ 
+   strtok3@10.3.5:
+@@ -8828,6 +9277,8 @@ snapshots:
+ 
+   supports-preserve-symlinks-flag@1.0.0: {}
+ 
++  symbol-tree@3.2.4: {}
++
+   text-table@0.2.0: {}
+ 
+   thread-stream@4.2.0:
+@@ -8850,6 +9301,12 @@ snapshots:
+ 
+   tinyrainbow@3.1.0: {}
+ 
++  tldts-core@7.4.10: {}
++
++  tldts@7.4.10:
++    dependencies:
++      tldts-core: 7.4.10
++
+   to-regex-range@5.0.1:
+     dependencies:
+       is-number: 7.0.0
+@@ -8868,8 +9325,16 @@ snapshots:
+ 
+   touch@3.1.1: {}
+ 
++  tough-cookie@6.0.2:
++    dependencies:
++      tldts: 7.4.10
++
+   tr46@0.0.3: {}
+ 
++  tr46@6.0.0:
++    dependencies:
++      punycode: 2.3.1
++
+   tree-kill@1.2.2: {}
+ 
+   tslib@1.14.1: {}
+@@ -8944,6 +9409,8 @@ snapshots:
+ 
+   undici-types@8.3.0: {}
+ 
++  undici@8.9.0: {}
++
+   universalify@2.0.1: {}
+ 
+   urijs@1.19.11: {}
+@@ -8984,7 +9451,7 @@ snapshots:
+       tsx: 4.23.1
+       yaml: 2.9.0
+ 
+-  vitest@4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0)):
++  vitest@4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0)):
+     dependencies:
+       '@vitest/expect': 4.1.10
+       '@vitest/mocker': 4.1.10(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+@@ -9011,10 +9478,11 @@ snapshots:
+       '@types/node': 26.1.2
+       '@vitest/coverage-v8': 4.1.10(vitest@4.1.10)
+       '@vitest/ui': 4.1.10(vitest@4.1.10)
++      jsdom: 30.0.1
+     transitivePeerDependencies:
+       - msw
+ 
+-  vitest@4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0)):
++  vitest@4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.10)(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0)):
+     dependencies:
+       '@vitest/expect': 4.1.2
+       '@vitest/mocker': 4.1.2(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+@@ -9040,10 +9508,11 @@ snapshots:
+       '@opentelemetry/api': 1.9.1
+       '@types/node': 26.1.1
+       '@vitest/ui': 4.1.10(vitest@4.1.2)
++      jsdom: 30.0.1
+     transitivePeerDependencies:
+       - msw
+ 
+-  vitest@4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0)):
++  vitest@4.1.2(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/ui@4.1.10(vitest@4.1.2))(jsdom@30.0.1)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0)):
+     dependencies:
+       '@vitest/expect': 4.1.2
+       '@vitest/mocker': 4.1.2(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
+@@ -9069,9 +9538,14 @@ snapshots:
+       '@opentelemetry/api': 1.9.1
+       '@types/node': 26.1.2
+       '@vitest/ui': 4.1.10(vitest@4.1.2)
++      jsdom: 30.0.1
+     transitivePeerDependencies:
+       - msw
+ 
++  w3c-xmlserializer@5.0.0:
++    dependencies:
++      xml-name-validator: 5.0.0
++
+   wcwidth@1.0.1:
+     dependencies:
+       defaults: 1.0.4
+@@ -9081,6 +9555,26 @@ snapshots:
+ 
+   webidl-conversions@3.0.1: {}
+ 
++  webidl-conversions@8.0.1: {}
++
++  whatwg-mimetype@5.0.0: {}
++
++  whatwg-url@16.0.1:
++    dependencies:
++      '@exodus/bytes': 1.15.1
++      tr46: 6.0.0
++      webidl-conversions: 8.0.1
++    transitivePeerDependencies:
++      - '@noble/hashes'
++
++  whatwg-url@17.1.0:
++    dependencies:
++      '@exodus/bytes': 1.15.1
++      tr46: 6.0.0
++      webidl-conversions: 8.0.1
++    transitivePeerDependencies:
++      - '@noble/hashes'
++
+   whatwg-url@5.0.0:
+     dependencies:
+       tr46: 0.0.3
+@@ -9154,6 +9648,10 @@ snapshots:
+ 
+   ws@8.21.1: {}
+ 
++  xml-name-validator@5.0.0: {}
++
++  xmlchars@2.2.0: {}
++
+   y18n@5.0.8: {}
+ 
+   yallist@4.0.0: {}
+diff --git a/scripts-ext/dev-dashboard.sh b/scripts-ext/dev-dashboard.sh
+new file mode 100755
+index 00000000..72fd38d9
+--- /dev/null
++++ b/scripts-ext/dev-dashboard.sh
+@@ -0,0 +1,42 @@
++#!/usr/bin/env bash
++#
++# Starts the dev dashboard with branch-aware port configuration.
++#
++# Sourcing worktree-config.sh is the point of this wrapper: it exports
++# VITE_API_BASE_URL pointing at this worktree's API port. Running
++# `pnpm --filter @attribution-service/dev-dashboard start` directly leaves that
++# unset, so the dashboard falls back to :3024 and silently talks to whichever
++# worktree happens to own the default port — or nothing at all.
++#
++
++set -euo pipefail
++
++SCRIPT_DIR=$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)
++REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." &> /dev/null && pwd)
++
++# shellcheck source=/dev/null
++source "${SCRIPT_DIR}/worktree-config.sh"
++
++# vite.config.ts pins 5174 with strictPort, so a stale dashboard from another
++# worktree fails the bind with an unhelpful error. Name the culprit instead.
++DASHBOARD_PORT=5174
++if command -v lsof >/dev/null 2>&1; then
++    if lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null | grep -E ":${DASHBOARD_PORT}( |$)" >/dev/null 2>&1; then
++        echo "Error: port ${DASHBOARD_PORT} is already in use — another dev dashboard is running." >&2
++        echo "The dashboard uses strictPort, so it cannot fall back to another port." >&2
++        echo >&2
++        echo "Holder:" >&2
++        lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null | grep -E ":${DASHBOARD_PORT}( |$)" >&2
++        echo >&2
++        echo "Stop it, or change DEV_FRONTEND_PORTS in .secrets.env and vite.config.ts together" >&2
++        echo "(the API's CORS layer allowlists specific ports, so changing one alone breaks preflight)." >&2
++        exit 1
++    fi
++fi
++
++echo "Dashboard:  http://localhost:${DASHBOARD_PORT}"
++echo "API target: ${VITE_API_BASE_URL}"
++echo
++
++cd "${REPO_ROOT}"
++exec pnpm --filter @attribution-service/dev-dashboard start
+diff --git a/scripts-ext/stop-local.sh b/scripts-ext/stop-local.sh
+new file mode 100755
+index 00000000..27764b14
+--- /dev/null
++++ b/scripts-ext/stop-local.sh
+@@ -0,0 +1,21 @@
++#!/usr/bin/env bash
++#
++# Stops this worktree's containers only.
++#
++# The compose project name is derived from the worktree path, so every worktree
++# owns an isolated stack. Sourcing worktree-config.sh is what keeps this from
++# tearing down a sibling worktree's LocalStack.
++#
++
++set -euo pipefail
++
++SCRIPT_DIR=$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)
++REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." &> /dev/null && pwd)
++
++# shellcheck source=/dev/null
++source "${SCRIPT_DIR}/worktree-config.sh"
++
++COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
++
++cd "${REPO_ROOT}"
++docker compose -p "${LOCALSTACK_PROJECT}" -f "${COMPOSE_FILE}" --profile service down

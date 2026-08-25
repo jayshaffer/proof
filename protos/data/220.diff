@@ -1,0 +1,1217 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 56275392..6c9ec6b4 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -47,6 +47,12 @@ packages/prospect-service-client/    # @attribution-service/prospect-service-cli
+ ├── src/
+ │   ├── ...              # implementation
+ │   └── __tests__/       # unit tests
++packages/practice-cohort/     # @attribution-service/practice-cohort
++├── src/                 # Shared by the M2 batch and the dashboard cohort preview
++│   ├── cohort.ts        # resolveCohort — SOLD selection; caller owns metric emission
++│   ├── guards.ts        # evaluateGuards + pure predicates (no observability dep)
++│   ├── skip-reason.ts   # SkipReason enum
++│   └── __tests__/       # unit tests
+ packages/scheduling-client/    # @attribution-service/scheduling-client
+ ├── src/
+ │   ├── client.ts        # createSchedulingClient factory (x-api-key auth)
+diff --git a/Dockerfile b/Dockerfile
+index 5457e50f..06cfd2cb 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -52,6 +52,7 @@ COPY --from=build /app/packages/identity-client/dist /app/packages/identity-clie
+ COPY --from=build /app/packages/patient-domain-client/dist /app/packages/patient-domain-client/dist
+ COPY --from=build /app/packages/provider-data-store-client/dist /app/packages/provider-data-store-client/dist
+ COPY --from=build /app/packages/marketing-client/dist /app/packages/marketing-client/dist
++COPY --from=build /app/packages/practice-cohort/dist /app/packages/practice-cohort/dist
+ COPY --from=build /app/packages/prospect-service-client/dist /app/packages/prospect-service-client/dist
+ COPY --from=build /app/packages/scheduling-client/dist /app/packages/scheduling-client/dist
+ # Copy API app source
+@@ -97,6 +98,7 @@ COPY --from=build /app/packages/data/dist /app/packages/data/dist
+ COPY --from=build /app/packages/feature-flags/dist /app/packages/feature-flags/dist
+ COPY --from=build /app/packages/kafka-client/dist /app/packages/kafka-client/dist
+ COPY --from=build /app/packages/pdf-renderer/dist /app/packages/pdf-renderer/dist
++COPY --from=build /app/packages/practice-cohort/dist /app/packages/practice-cohort/dist
+ COPY --from=build /app/packages/practice-report/dist /app/packages/practice-report/dist
+ COPY --from=build /app/packages/s3-client/dist /app/packages/s3-client/dist
+ COPY --from=build /app/apps/jobs/batch-runner/dist /app/apps/jobs/batch-runner/dist
+diff --git a/apps/api/package.json b/apps/api/package.json
+index 83274df6..29044baf 100644
+--- a/apps/api/package.json
++++ b/apps/api/package.json
+@@ -28,6 +28,7 @@
+     "@attribution-service/identity-client": "workspace:^",
+     "@attribution-service/patient-domain-client": "workspace:^",
+     "@attribution-service/marketing-client": "workspace:^",
++    "@attribution-service/practice-cohort": "workspace:^",
+     "@attribution-service/prospect-service-client": "workspace:^",
+     "@attribution-service/provider-data-store-client": "workspace:^",
+     "@attribution-service/scheduling-client": "workspace:^",
+diff --git a/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+index e25bb177..2abf033c 100644
+--- a/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
++++ b/apps/api/src/__tests__/routes/internal-auth-matrix.test.ts
+@@ -63,6 +63,7 @@ describe("internal auth matrix", () => {
+       "DELETE /internal/practices/{practiceId}",
+       "GET /internal/pcp-referrals",
+       "GET /internal/pcp-referrals/{referralId}",
++      "GET /internal/practice-reports/cohort-preview",
+       "GET /internal/practices",
+       "GET /internal/practices/{practiceId}",
+       "PATCH /internal/pcp-referrals/{referralId}",
+@@ -73,6 +74,7 @@ describe("internal auth matrix", () => {
+     expect(preflight.map((o) => `${o.method} ${o.url}`).sort()).toEqual([
+       "OPTIONS /internal/pcp-referrals",
+       "OPTIONS /internal/pcp-referrals/{referralId}",
++      "OPTIONS /internal/practice-reports/cohort-preview",
+       "OPTIONS /internal/practices",
+       "OPTIONS /internal/practices/{practiceId}",
+     ]);
+diff --git a/apps/api/src/__tests__/routes/internal-cohort-preview.test.ts b/apps/api/src/__tests__/routes/internal-cohort-preview.test.ts
+new file mode 100644
+index 00000000..7ead368e
+--- /dev/null
++++ b/apps/api/src/__tests__/routes/internal-cohort-preview.test.ts
+@@ -0,0 +1,145 @@
++import { clearAllItems, practiceRepository } from "@attribution-service/data";
++import { afterEach, describe, expect, test, vi } from "vitest";
++import { stats } from "../../components";
++import { useServerHelper } from "../util";
++
++vi.mock("../../config");
++
++const AUTH_HEADER = { authorization: "Bearer valid-test-key" };
++
++const seedPractice = (
++  id: string,
++  overrides: { status?: "SOLD" | "CHURNED"; practiceEmail?: string } = {},
++) =>
++  practiceRepository.upsertPractice({
++    id,
++    name: `Practice ${id}`,
++    status: overrides.status ?? "SOLD",
++    accountManager: "Jordan Lee",
++    ...(overrides.practiceEmail !== undefined && { practiceEmail: overrides.practiceEmail }),
++  });
++
++describe("GET /internal/practice-reports/cohort-preview", () => {
++  const serverHelper = useServerHelper();
++
++  afterEach(async () => {
++    await clearAllItems();
++  });
++
++  const preview = () =>
++    serverHelper.getServer().inject({
++      method: "GET",
++      url: "/internal/practice-reports/cohort-preview",
++      headers: AUTH_HEADER,
++    });
++
++  test("selects only SOLD practices", async () => {
++    await seedPractice("SOLD-1", { practiceEmail: "a@example.com" });
++    await seedPractice("CHURNED-1", { status: "CHURNED", practiceEmail: "b@example.com" });
++
++    const body = (await preview()).json();
++
++    expect(body.cohortSize).toBe(1);
++    expect(body.proceedCount).toBe(1);
++  });
++
++  test("reports a practice without practiceEmail as skipped NO_PRACTICE_CONTACT_EMAIL", async () => {
++    await seedPractice("NO-EMAIL");
++
++    const body = (await preview()).json();
++
++    expect(body.skipped).toEqual([
++      {
++        practiceId: "NO-EMAIL",
++        practiceName: "Practice NO-EMAIL",
++        reason: "NO_PRACTICE_CONTACT_EMAIL",
++      },
++    ]);
++    expect(body.proceedCount).toBe(0);
++  });
++
++  test("treats a whitespace-only practiceEmail as absent", async () => {
++    await seedPractice("BLANK-EMAIL", { practiceEmail: "   " });
++
++    const body = (await preview()).json();
++
++    expect(body.skipped[0].reason).toBe("NO_PRACTICE_CONTACT_EMAIL");
++  });
++
++  test("reports a practice with a valid email as proceeding", async () => {
++    await seedPractice("GOOD-1", { practiceEmail: "front-desk@example.com" });
++
++    const body = (await preview()).json();
++
++    expect(body.proceedCount).toBe(1);
++    expect(body.skipped).toEqual([]);
++  });
++
++  test("carries cohort size, proceed count, and the skip list together", async () => {
++    await seedPractice("GOOD-1", { practiceEmail: "a@example.com" });
++    await seedPractice("GOOD-2", { practiceEmail: "b@example.com" });
++    await seedPractice("BAD-1");
++
++    const res = await preview();
++
++    expect(res.statusCode).toBe(200);
++    expect(res.json()).toMatchObject({
++      cohortSize: 3,
++      proceedCount: 2,
++      optOutVerified: false,
++    });
++    expect(res.json().skipped).toHaveLength(1);
++  });
++
++  test("emits no Datadog counter or gauge — a preview must not move batch metrics", async () => {
++    await seedPractice("GOOD-1", { practiceEmail: "a@example.com" });
++    await seedPractice("BAD-1");
++    const counterSpy = vi.spyOn(stats, "sendCounter").mockResolvedValue(undefined);
++    const gaugeSpy = vi.spyOn(stats, "sendGauge").mockResolvedValue(undefined);
++
++    try {
++      const res = await preview();
++      expect(res.statusCode).toBe(200);
++
++      const batchCalls = [...counterSpy.mock.calls, ...gaugeSpy.mock.calls].filter(([metric]) =>
++        String(metric).startsWith("batch."),
++      );
++      expect(batchCalls).toEqual([]);
++    } finally {
++      counterSpy.mockRestore();
++      gaugeSpy.mockRestore();
++    }
++  });
++
++  test("writes no PracticeReportPublished ledger row", async () => {
++    await seedPractice("GOOD-1", { practiceEmail: "a@example.com" });
++
++    await preview();
++
++    // A published row would appear as a new item beyond the seeded practice.
++    const practices = await practiceRepository.listPractices(100);
++    expect(practices.practices.map((p) => p.id)).toEqual(["GOOD-1"]);
++  });
++
++  test("reports OPTED_OUT for zero practices and surfaces the unverified caveat", async () => {
++    await seedPractice("GOOD-1", { practiceEmail: "a@example.com" });
++    await seedPractice("BAD-1");
++
++    const body = (await preview()).json();
++
++    expect(body.skipped.filter((s: { reason: string }) => s.reason === "OPTED_OUT")).toEqual([]);
++    expect(body.optOutVerified).toBe(false);
++  });
++
++  test("enumerates a cohort spanning multiple pages", async () => {
++    // resolveCohort pages at 100, so this must exceed one page to prove the
++    // preview covers the whole cohort rather than just the first page.
++    const ids = Array.from({ length: 105 }, (_, i) => `P-${String(i).padStart(3, "0")}`);
++    await Promise.all(ids.map((id) => seedPractice(id, { practiceEmail: `${id}@example.com` })));
++
++    const body = (await preview()).json();
++
++    expect(body.cohortSize).toBe(105);
++    expect(body.proceedCount).toBe(105);
++  });
++});
+diff --git a/apps/api/src/__tests__/routes/internal-spec-contract.test.ts b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+index 9058c9a6..ff51e400 100644
+--- a/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
++++ b/apps/api/src/__tests__/routes/internal-spec-contract.test.ts
+@@ -69,12 +69,14 @@ describe("internal spec contract", () => {
+       "deleteAllPractices",
+       "deletePcpReferral",
+       "deletePractice",
++      "getCohortPreview",
+       "getInternalPcpReferral",
+       "getInternalPractice",
+       "listInternalPcpReferrals",
+       "listInternalPractices",
+       "optionsInternalPcpReferrals",
+       "optionsInternalPcpReferralsReferralId",
++      "optionsInternalPracticeReportsCohortPreview",
+       "optionsInternalPractices",
+       "optionsInternalPracticesPracticeId",
+       "updatePcpReferral",
+diff --git a/apps/api/src/generated/internal-route-handler-types.ts b/apps/api/src/generated/internal-route-handler-types.ts
+index 52566453..8098b013 100644
+--- a/apps/api/src/generated/internal-route-handler-types.ts
++++ b/apps/api/src/generated/internal-route-handler-types.ts
+@@ -42,6 +42,8 @@ export type GetInternalPcpReferralRouteHandler = RouteHandler<'getInternalPcpRef
+ export type DeletePcpReferralRouteHandler = RouteHandler<'deletePcpReferral'>
+ export type OptionsInternalPcpReferralsReferralIdRouteHandler = RouteHandler<'optionsInternalPcpReferralsReferralId'>
+ export type UpdatePcpReferralRouteHandler = RouteHandler<'updatePcpReferral'>
++export type GetCohortPreviewRouteHandler = RouteHandler<'getCohortPreview'>
++export type OptionsInternalPracticeReportsCohortPreviewRouteHandler = RouteHandler<'optionsInternalPracticeReportsCohortPreview'>
+ export type ListInternalPracticesRouteHandler = RouteHandler<'listInternalPractices'>
+ export type CreatePracticeRouteHandler = RouteHandler<'createPractice'>
+ export type DeleteAllPracticesRouteHandler = RouteHandler<'deleteAllPractices'>
+diff --git a/apps/api/src/generated/internal-types.ts b/apps/api/src/generated/internal-types.ts
+index 543283f5..0a9adebd 100644
+--- a/apps/api/src/generated/internal-types.ts
++++ b/apps/api/src/generated/internal-types.ts
+@@ -71,6 +71,31 @@ export interface paths {
+         patch: operations["updatePcpReferral"];
+         trace?: never;
+     };
++    "/internal/practice-reports/cohort-preview": {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        /**
++         * Preview the monthly batch cohort
++         * @description Read-only. Resolves the cohort exactly as the monthly batch would and reports, per practice, whether it would proceed or be skipped and why. Renders no PDF, writes no ledger row, stages nothing to S3, sends no email, and emits no batch metric.
++         *     The opt-out guard is evaluated against an attribute the practice entity does not declare, so it can never report OPTED_OUT. optOutVerified is false to make that explicit — a preview must not imply it checked opt-out status.
++         */
++        get: operations["getCohortPreview"];
++        put?: never;
++        post?: never;
++        delete?: never;
++        /**
++         * CORS preflight
++         * @description Auto-generated preflight operation for Kong routing.
++         */
++        options: operations["optionsInternalPracticeReportsCohortPreview"];
++        head?: never;
++        patch?: never;
++        trace?: never;
++    };
+     "/internal/practices": {
+         parameters: {
+             query?: never;
+@@ -239,6 +264,31 @@ export interface components {
+             /** Format: date */
+             lastReferralDate?: string;
+         };
++        /**
++         * @description Why the batch would skip a practice.
++         * @enum {string}
++         */
++        SkipReason: "NO_PRACTICE_CONTACT_EMAIL" | "OPTED_OUT" | "BELOW_REFERRAL_FLOOR";
++        CohortPreviewSkip: {
++            practiceId: string;
++            practiceName: string;
++            reason: components["schemas"]["SkipReason"];
++        };
++        CohortPreviewResponse: {
++            /**
++             * Format: int32
++             * @description Total SOLD practices selected, across every page.
++             */
++            cohortSize: number;
++            /**
++             * Format: int32
++             * @description How many practices would have a report generated.
++             */
++            proceedCount: number;
++            skipped: components["schemas"]["CohortPreviewSkip"][];
++            /** @description Always false. The opt-out guard reads an attribute the practice entity does not declare, so no practice can be reported OPTED_OUT and this preview has not verified opt-out status. */
++            optOutVerified: boolean;
++        };
+         /**
+          * @description Whether the lead is associated with therapy, psychiatry, or both.
+          * @enum {string}
+@@ -603,6 +653,47 @@ export interface operations {
+             500: components["responses"]["InternalServerErrorResponse"];
+         };
+     };
++    getCohortPreview: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description The cohort preview. */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["CohortPreviewResponse"];
++                };
++            };
++            401: components["responses"]["AuthenticationErrorResponse"];
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
++    optionsInternalPracticeReportsCohortPreview: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description No Content */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            500: components["responses"]["InternalServerErrorResponse"];
++        };
++    };
+     listInternalPractices: {
+         parameters: {
+             query?: {
+diff --git a/apps/api/src/routes/internal/index.ts b/apps/api/src/routes/internal/index.ts
+index 59e68a8c..3198a0a8 100644
+--- a/apps/api/src/routes/internal/index.ts
++++ b/apps/api/src/routes/internal/index.ts
+@@ -1,2 +1,3 @@
+ export * from "./pcp-referrals";
++export * from "./practice-reports";
+ export * from "./practices";
+diff --git a/apps/api/src/routes/internal/practice-reports.ts b/apps/api/src/routes/internal/practice-reports.ts
+new file mode 100644
+index 00000000..4f990516
+--- /dev/null
++++ b/apps/api/src/routes/internal/practice-reports.ts
+@@ -0,0 +1,14 @@
++import type {
++  GetCohortPreviewRouteHandler,
++  OptionsInternalPracticeReportsCohortPreviewRouteHandler,
++} from "../../generated/internal-route-handler-types";
++import * as cohortPreviewService from "../../service/cohort-preview-service";
++
++export const getCohortPreview: GetCohortPreviewRouteHandler = async () => {
++  return cohortPreviewService.getCohortPreview();
++};
++
++export const optionsInternalPracticeReportsCohortPreview: OptionsInternalPracticeReportsCohortPreviewRouteHandler =
++  async (_request, reply) => {
++    reply.code(204).send();
++  };
+diff --git a/apps/api/src/service/cohort-preview-service.ts b/apps/api/src/service/cohort-preview-service.ts
+new file mode 100644
+index 00000000..cb0c22e0
+--- /dev/null
++++ b/apps/api/src/service/cohort-preview-service.ts
+@@ -0,0 +1,42 @@
++import { evaluateGuards, resolveCohort } from "@attribution-service/practice-cohort";
++import type { components } from "../generated/internal-types";
++
++type CohortPreviewResponse = components["schemas"]["CohortPreviewResponse"];
++type CohortPreviewSkip = components["schemas"]["CohortPreviewSkip"];
++
++/**
++ * Resolves the cohort and evaluates the same guards the batch does, without any
++ * of its side effects: no PDF render, no ledger row, no S3 staging, no email,
++ * and no metric emission. resolveCohort is called without onPageFetched
++ * precisely so no batch counter moves.
++ *
++ * optOutVerified is always false: isPracticeOptedOut reads `optedOut`, which
++ * PracticeEntity does not declare (NEV-1412 closed Wont fix), so OPTED_OUT is
++ * unreachable and the preview must not imply otherwise.
++ */
++export async function getCohortPreview(): Promise<CohortPreviewResponse> {
++  const cohort = await resolveCohort();
++
++  const skipped: CohortPreviewSkip[] = [];
++  let proceedCount = 0;
++
++  for (const practice of cohort.practices) {
++    const decision = evaluateGuards(practice);
++    if (decision.decision === "SKIP") {
++      skipped.push({
++        practiceId: practice.id,
++        practiceName: practice.name,
++        reason: decision.reason,
++      });
++      continue;
++    }
++    proceedCount++;
++  }
++
++  return {
++    cohortSize: cohort.size,
++    proceedCount,
++    skipped,
++    optOutVerified: false,
++  };
++}
+diff --git a/apps/api/tsconfig.json b/apps/api/tsconfig.json
+index b7c2d7a4..b9e33c64 100644
+--- a/apps/api/tsconfig.json
++++ b/apps/api/tsconfig.json
+@@ -8,6 +8,9 @@
+   "references": [
+     {
+       "path": "../../packages/data"
++    },
++    {
++      "path": "../../packages/practice-cohort"
+     }
+   ]
+ }
+diff --git a/apps/jobs/batch-runner/package.json b/apps/jobs/batch-runner/package.json
+index 15987205..2e8edf51 100644
+--- a/apps/jobs/batch-runner/package.json
++++ b/apps/jobs/batch-runner/package.json
+@@ -20,6 +20,7 @@
+     "@attribution-service/feature-flags": "workspace:*",
+     "@attribution-service/kafka-client": "workspace:*",
+     "@attribution-service/pdf-renderer": "workspace:*",
++    "@attribution-service/practice-cohort": "workspace:*",
+     "@attribution-service/practice-report": "workspace:*",
+     "@attribution-service/s3-client": "workspace:*",
+     "@pathccm/observability": "1.2.2",
+diff --git a/apps/jobs/batch-runner/src/__tests__/services/loop.test.ts b/apps/jobs/batch-runner/src/__tests__/services/loop.test.ts
+index e5c24265..9fa27551 100644
+--- a/apps/jobs/batch-runner/src/__tests__/services/loop.test.ts
++++ b/apps/jobs/batch-runner/src/__tests__/services/loop.test.ts
+@@ -1,12 +1,11 @@
+ import type { Practice } from "@attribution-service/data";
+ import { PracticeStatus } from "@attribution-service/data";
++import { type Cohort, SkipReason } from "@attribution-service/practice-cohort";
+ import { DefaultLogger, DefaultStats } from "@pathccm/observability";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import { runBatch } from "../../services/loop";
+-import { SkipReason } from "../../services/skip-reason";
+ import type { PracticeOutcome } from "../../services/types";
+ import { BATCH_METRICS } from "../../util/metrics";
+-import type { Cohort } from "../../util/types";
+ 
+ const buildPractice = (id: string, overrides: Record<string, unknown> = {}): Practice =>
+   ({
+diff --git a/apps/jobs/batch-runner/src/__tests__/services/metrics-emission.test.ts b/apps/jobs/batch-runner/src/__tests__/services/metrics-emission.test.ts
+index 327d71a7..d2e3d6c3 100644
+--- a/apps/jobs/batch-runner/src/__tests__/services/metrics-emission.test.ts
++++ b/apps/jobs/batch-runner/src/__tests__/services/metrics-emission.test.ts
+@@ -1,7 +1,7 @@
++import { SkipReason } from "@attribution-service/practice-cohort";
+ import { DefaultStats } from "@pathccm/observability";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import { emitPracticeSkipped } from "../../services/guards";
+-import { SkipReason } from "../../services/skip-reason";
+ import { BATCH_METRICS } from "../../util/metrics";
+ 
+ describe("emitPracticeSkipped", () => {
+diff --git a/apps/jobs/batch-runner/src/__tests__/services/outcome.test.ts b/apps/jobs/batch-runner/src/__tests__/services/outcome.test.ts
+index 4cc2cbe2..3cdb54fe 100644
+--- a/apps/jobs/batch-runner/src/__tests__/services/outcome.test.ts
++++ b/apps/jobs/batch-runner/src/__tests__/services/outcome.test.ts
+@@ -1,6 +1,6 @@
++import { SkipReason } from "@attribution-service/practice-cohort";
+ import { describe, expect, it } from "vitest";
+ import { OUTCOME_TO_SKIP_REASON } from "../../services/outcome";
+-import { SkipReason } from "../../services/skip-reason";
+ 
+ describe("OUTCOME_TO_SKIP_REASON", () => {
+   it("maps SKIPPED_FLOOR to BELOW_REFERRAL_FLOOR", () => {
+diff --git a/apps/jobs/batch-runner/src/services/cohort.ts b/apps/jobs/batch-runner/src/services/cohort.ts
+index 7ed06d6f..f86f33f8 100644
+--- a/apps/jobs/batch-runner/src/services/cohort.ts
++++ b/apps/jobs/batch-runner/src/services/cohort.ts
+@@ -1,35 +1,35 @@
+-import { type Practice, PracticeStatus, practiceRepository } from "@attribution-service/data";
++import {
++  type Cohort,
++  type ResolveCohortOptions,
++  resolveCohort as resolveCohortWithoutMetrics,
++} from "@attribution-service/practice-cohort";
+ import { DefaultLogger, DefaultStats } from "@pathccm/observability";
+ import { BATCH_METRICS } from "../util/metrics";
+-import type { Cohort, ResolveCohortOptions } from "../util/types";
+ 
+-const DEFAULT_PAGE_SIZE = 100;
+-
+-export const resolveCohort = async ({
+-  pageSize = DEFAULT_PAGE_SIZE,
+-}: ResolveCohortOptions = {}): Promise<Cohort> => {
+-  const practices: Practice[] = [];
+-  let cursor: string | undefined;
+-  do {
+-    const page = await practiceRepository.listPracticesByStatus(
+-      PracticeStatus.SOLD,
+-      pageSize,
+-      cursor,
+-    );
+-    practices.push(...page.practices);
++/**
++ * Batch-side cohort resolution: shared selection logic plus the batch's own
++ * metric emission. The dashboard preview calls the shared resolver directly so
++ * it moves neither of these.
++ */
++export const resolveCohort = async (
++  options: Omit<ResolveCohortOptions, "onPageFetched"> = {},
++): Promise<Cohort> => {
++  const cohort = await resolveCohortWithoutMetrics({
++    ...options,
+     // Fire-and-forget: a transient metric-backend failure must not abort the
+     // batch mid-pagination and discard successful DDB reads.
+-    void DefaultStats.sendCounter(BATCH_METRICS.COHORT.PAGE_FETCHED, 1, []).catch((error) => {
+-      DefaultLogger.error({ err: error }, "failed to emit cohort page counter");
+-    });
+-    cursor = page.nextCursor;
+-  } while (cursor !== undefined);
++    onPageFetched: () => {
++      void DefaultStats.sendCounter(BATCH_METRICS.COHORT.PAGE_FETCHED, 1, []).catch((error) => {
++        DefaultLogger.error({ err: error }, "failed to emit cohort page counter");
++      });
++    },
++  });
+ 
+-  const size = practices.length;
+   // Fire-and-forget for the same reason as the page counter above: a transient
+   // metric-backend failure must not fail an otherwise-successful cohort resolve.
+-  void DefaultStats.sendGauge(BATCH_METRICS.COHORT.SIZE, size, []).catch((error) => {
++  void DefaultStats.sendGauge(BATCH_METRICS.COHORT.SIZE, cohort.size, []).catch((error) => {
+     DefaultLogger.error({ err: error }, "failed to emit cohort size gauge");
+   });
+-  return { practices, size };
++
++  return cohort;
+ };
+diff --git a/apps/jobs/batch-runner/src/services/guards.ts b/apps/jobs/batch-runner/src/services/guards.ts
+index 353e9723..36160ca4 100644
+--- a/apps/jobs/batch-runner/src/services/guards.ts
++++ b/apps/jobs/batch-runner/src/services/guards.ts
+@@ -1,33 +1,14 @@
+-import type { Practice } from "@attribution-service/data";
+ import { DefaultLogger, DefaultStats } from "@pathccm/observability";
+ import { BATCH_METRICS, METRIC_TAG_KEY } from "../util/metrics";
+-import { SkipReason } from "./skip-reason";
+-import type { GuardDecision, PracticeSkipEmission, PracticeWithGuardFields } from "./types";
+-
+-export const hasPracticeContactEmail = (practice: Practice): boolean => {
+-  return practice.practiceEmail != null && practice.practiceEmail.trim().length > 0;
+-};
+-
+-// Local stub until NEV-1412 lands the real predicate; consumed via import so
+-// the drop-in swap is a one-line change.
+-// TODO(NEV-1412): replace with imported predicate from opt-out module.
+-export const isPracticeOptedOut = (practice: Practice): boolean => {
+-  return (practice as PracticeWithGuardFields).optedOut === true;
+-};
+-
+-export const evaluateGuards = (practice: Practice): GuardDecision => {
+-  if (isPracticeOptedOut(practice)) {
+-    return { decision: "SKIP", reason: SkipReason.OPTED_OUT };
+-  }
+-  if (!hasPracticeContactEmail(practice)) {
+-    return { decision: "SKIP", reason: SkipReason.NO_PRACTICE_CONTACT_EMAIL };
+-  }
+-  return { decision: "PROCEED" };
+-};
++import type { PracticeSkipEmission } from "./types";
+ 
+ // Guard-emit boundary: every skip goes through this single function so the
+ // counter name and tag shape stay in one place. Never emit a per-reason
+ // metric name — reason is a tag, not a suffix.
++//
++// The guard predicates live in @attribution-service/practice-cohort so the
++// dashboard preview evaluates the same rules; this emitter stays here because
++// a preview must not move batch counters.
+ export const emitPracticeSkipped = ({ practiceId, reason }: PracticeSkipEmission): void => {
+   void DefaultStats.sendCounter(BATCH_METRICS.PRACTICE.SKIPPED, 1, [
+     { key: METRIC_TAG_KEY.REASON, value: reason },
+diff --git a/apps/jobs/batch-runner/src/services/loop.ts b/apps/jobs/batch-runner/src/services/loop.ts
+index e5ab1ca3..49906010 100644
+--- a/apps/jobs/batch-runner/src/services/loop.ts
++++ b/apps/jobs/batch-runner/src/services/loop.ts
+@@ -1,8 +1,8 @@
+ import type { Practice } from "@attribution-service/data";
++import { type Cohort, evaluateGuards } from "@attribution-service/practice-cohort";
+ import { DefaultLogger, DefaultStats } from "@pathccm/observability";
+ import { BATCH_METRICS, METRIC_TAG_KEY } from "../util/metrics";
+-import type { Cohort } from "../util/types";
+-import { emitPracticeSkipped, evaluateGuards } from "./guards";
++import { emitPracticeSkipped } from "./guards";
+ import { isSkippedOutcome, OUTCOME_TO_SKIP_REASON } from "./outcome";
+ import { OUTCOME_KIND, type PracticeOutcome, type ProcessPractice } from "./types";
+ 
+diff --git a/apps/jobs/batch-runner/src/services/outcome.ts b/apps/jobs/batch-runner/src/services/outcome.ts
+index 030d73f6..dca8c2c4 100644
+--- a/apps/jobs/batch-runner/src/services/outcome.ts
++++ b/apps/jobs/batch-runner/src/services/outcome.ts
+@@ -1,4 +1,4 @@
+-import { SkipReason } from "./skip-reason";
++import { SkipReason } from "@attribution-service/practice-cohort";
+ import {
+   OUTCOME_KIND,
+   type PracticeOutcome,
+diff --git a/apps/jobs/batch-runner/src/services/types.ts b/apps/jobs/batch-runner/src/services/types.ts
+index 392aa707..f5089dae 100644
+--- a/apps/jobs/batch-runner/src/services/types.ts
++++ b/apps/jobs/batch-runner/src/services/types.ts
+@@ -1,11 +1,5 @@
+ import type { Practice } from "@attribution-service/data";
+-import type { SkipReason } from "./skip-reason";
+-
+-export type PracticeWithGuardFields = Practice & {
+-  optedOut?: boolean;
+-};
+-
+-export type GuardDecision = { decision: "PROCEED" } | { decision: "SKIP"; reason: SkipReason };
++import type { SkipReason } from "@attribution-service/practice-cohort";
+ 
+ export interface PracticeSkipEmission {
+   practiceId: string;
+diff --git a/apps/jobs/batch-runner/src/util/types.ts b/apps/jobs/batch-runner/src/util/types.ts
+index 67fe6a81..dae7f066 100644
+--- a/apps/jobs/batch-runner/src/util/types.ts
++++ b/apps/jobs/batch-runner/src/util/types.ts
+@@ -1,5 +1,3 @@
+-import type { Practice } from "@attribution-service/data";
+-
+ export type OnShutdownHook = () => void | Promise<void>;
+ 
+ export interface BootstrapDeps {
+@@ -8,15 +6,6 @@ export interface BootstrapDeps {
+   onShutdown?: OnShutdownHook;
+ }
+ 
+-export interface ResolveCohortOptions {
+-  pageSize?: number;
+-}
+-
+-export interface Cohort {
+-  practices: Practice[];
+-  size: number;
+-}
+-
+ export interface S3ClientConfigInput {
+   S3_HANDOFF_BUCKET: string;
+   AWS_REGION: string;
+diff --git a/apps/jobs/batch-runner/tsconfig.json b/apps/jobs/batch-runner/tsconfig.json
+index dd0175f3..96a4a68f 100644
+--- a/apps/jobs/batch-runner/tsconfig.json
++++ b/apps/jobs/batch-runner/tsconfig.json
+@@ -15,6 +15,9 @@
+     {
+       "path": "../../../packages/pdf-renderer"
+     },
++    {
++      "path": "../../../packages/practice-cohort"
++    },
+     {
+       "path": "../../../packages/practice-report"
+     },
+diff --git a/docs/openapi-internal.yaml b/docs/openapi-internal.yaml
+index 50275c4a..b0c3b958 100644
+--- a/docs/openapi-internal.yaml
++++ b/docs/openapi-internal.yaml
+@@ -29,6 +29,8 @@ security:
+ tags:
+   - name: pcp-referrals
+     description: Internal PCP referral management endpoints
++  - name: practice-reports
++    description: Internal monthly batch report endpoints
+   - name: practices
+     description: Internal practice management endpoints
+ 
+@@ -266,6 +268,48 @@ paths:
+       tags:
+         - pcp-referrals
+ 
++  /internal/practice-reports/cohort-preview:
++    get:
++      operationId: getCohortPreview
++      summary: Preview the monthly batch cohort
++      description: >
++        Read-only. Resolves the cohort exactly as the monthly batch would and
++        reports, per practice, whether it would proceed or be skipped and why.
++        Renders no PDF, writes no ledger row, stages nothing to S3, sends no
++        email, and emits no batch metric.
++
++        The opt-out guard is evaluated against an attribute the practice entity
++        does not declare, so it can never report OPTED_OUT. optOutVerified is
++        false to make that explicit — a preview must not imply it checked
++        opt-out status.
++      security:
++        - apiKeyAuth: []
++      responses:
++        "200":
++          description: The cohort preview.
++          content:
++            application/json:
++              schema:
++                $ref: "#/components/schemas/CohortPreviewResponse"
++        "401":
++          $ref: "#/components/responses/AuthenticationErrorResponse"
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practice-reports
++    options:
++      summary: CORS preflight
++      description: Auto-generated preflight operation for Kong routing.
++      operationId: optionsInternalPracticeReportsCohortPreview
++      security: []
++      responses:
++        "204":
++          description: No Content
++        "500":
++          $ref: "#/components/responses/InternalServerErrorResponse"
++      tags:
++        - practice-reports
++
+   /internal/practices:
+     get:
+       operationId: listInternalPractices
+@@ -762,6 +806,64 @@ components:
+         - name
+         - status
+ 
++    SkipReason:
++      type: string
++      description: Why the batch would skip a practice.
++      enum:
++        - NO_PRACTICE_CONTACT_EMAIL
++        - OPTED_OUT
++        - BELOW_REFERRAL_FLOOR
++
++    CohortPreviewSkip:
++      type: object
++      properties:
++        practiceId:
++          type: string
++          minLength: 1
++          maxLength: 100
++        practiceName:
++          type: string
++          minLength: 1
++          maxLength: 255
++        reason:
++          $ref: "#/components/schemas/SkipReason"
++      required:
++        - practiceId
++        - practiceName
++        - reason
++
++    CohortPreviewResponse:
++      type: object
++      properties:
++        cohortSize:
++          type: integer
++          format: int32
++          minimum: 0
++          maximum: 1000000
++          description: Total SOLD practices selected, across every page.
++        proceedCount:
++          type: integer
++          format: int32
++          minimum: 0
++          maximum: 1000000
++          description: How many practices would have a report generated.
++        skipped:
++          type: array
++          maxItems: 1000000
++          items:
++            $ref: "#/components/schemas/CohortPreviewSkip"
++        optOutVerified:
++          type: boolean
++          description: >
++            Always false. The opt-out guard reads an attribute the practice
++            entity does not declare, so no practice can be reported OPTED_OUT
++            and this preview has not verified opt-out status.
++      required:
++        - cohortSize
++        - proceedCount
++        - skipped
++        - optOutVerified
++
+     LeadType:
+       type: string
+       description: Whether the lead is associated with therapy, psychiatry, or both.
+diff --git a/packages/practice-cohort/package.json b/packages/practice-cohort/package.json
+new file mode 100644
+index 00000000..81b967bd
+--- /dev/null
++++ b/packages/practice-cohort/package.json
+@@ -0,0 +1,34 @@
++{
++  "name": "@attribution-service/practice-cohort",
++  "version": "1.0.0",
++  "private": true,
++  "main": "./dist/index.js",
++  "types": "./dist/index.d.ts",
++  "exports": {
++    ".": {
++      "types": "./dist/index.d.ts",
++      "default": "./dist/index.js"
++    }
++  },
++  "typesVersions": {
++    "*": {
++      "*": [
++        "./dist/*"
++      ]
++    }
++  },
++  "scripts": {
++    "build": "tsc --build",
++    "test": "vitest run --reporter=verbose .",
++    "test:watch": "vitest watch --no-file-parallelism .",
++    "test:coverage": "vitest run --reporter=verbose --coverage ."
++  },
++  "dependencies": {
++    "@attribution-service/data": "workspace:^"
++  },
++  "devDependencies": {
++    "@aws-sdk/client-dynamodb": "^3.1096.0",
++    "vitest": "^4.1.2",
++    "zod": "^4.4.3"
++  }
++}
+diff --git a/packages/practice-cohort/src/__tests__/cohort.test.ts b/packages/practice-cohort/src/__tests__/cohort.test.ts
+new file mode 100644
+index 00000000..1d70cdad
+--- /dev/null
++++ b/packages/practice-cohort/src/__tests__/cohort.test.ts
+@@ -0,0 +1,78 @@
++import { clearAllItems, PracticeStatus, practiceRepository } from "@attribution-service/data";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { resolveCohort } from "../cohort";
++
++const seedPractices = async (count: number, status: PracticeStatus) => {
++  const paddingWidth = String(count).length;
++  await Promise.all(
++    Array.from({ length: count }, (_, i) => {
++      const id = `ACCT-${String(i + 1).padStart(paddingWidth, "0")}`;
++      return practiceRepository.upsertPractice({
++        id,
++        name: `Practice ${id}`,
++        status,
++        accountManager: "Test Manager",
++      });
++    }),
++  );
++};
++
++describe("resolveCohort", () => {
++  afterEach(async () => {
++    await clearAllItems();
++  });
++
++  it("returns every SOLD practice exactly once when paginating GSI reads", async () => {
++    await seedPractices(50, PracticeStatus.SOLD);
++
++    const cohort = await resolveCohort({ pageSize: 10 });
++
++    expect(cohort.size).toBe(50);
++    expect(new Set(cohort.practices.map((p) => p.id)).size).toBe(50);
++  });
++
++  it("excludes non-SOLD practices from the cohort", async () => {
++    await seedPractices(5, PracticeStatus.SOLD);
++    await practiceRepository.upsertPractice({
++      id: "CHURN-1",
++      name: "Churned Practice",
++      status: PracticeStatus.CHURNED,
++      accountManager: "Test",
++    });
++
++    const cohort = await resolveCohort({ pageSize: 10 });
++
++    expect(cohort.size).toBe(5);
++    expect(cohort.practices.map((p) => p.id)).not.toContain("CHURN-1");
++  });
++
++  it("serves the cohort from the status GSI rather than a table scan", async () => {
++    await seedPractices(3, PracticeStatus.SOLD);
++    const listSpy = vi.spyOn(practiceRepository, "listPracticesByStatus");
++
++    await resolveCohort({ pageSize: 2 });
++
++    expect(listSpy).toHaveBeenCalled();
++    for (const call of listSpy.mock.calls) {
++      expect(call[0]).toBe(PracticeStatus.SOLD);
++    }
++    listSpy.mockRestore();
++  });
++
++  it("invokes onPageFetched once per page so the caller owns metric emission", async () => {
++    await seedPractices(50, PracticeStatus.SOLD);
++    const onPageFetched = vi.fn();
++
++    await resolveCohort({ pageSize: 10, onPageFetched });
++
++    expect(onPageFetched.mock.calls.length).toBeGreaterThanOrEqual(5);
++  });
++
++  it("resolves without a callback, so a read-only caller emits nothing", async () => {
++    await seedPractices(4, PracticeStatus.SOLD);
++
++    const cohort = await resolveCohort({ pageSize: 2 });
++
++    expect(cohort.size).toBe(4);
++  });
++});
+diff --git a/apps/jobs/batch-runner/src/__tests__/services/guards.test.ts b/packages/practice-cohort/src/__tests__/guards.test.ts
+similarity index 94%
+rename from apps/jobs/batch-runner/src/__tests__/services/guards.test.ts
+rename to packages/practice-cohort/src/__tests__/guards.test.ts
+index 60620908..ac248932 100644
+--- a/apps/jobs/batch-runner/src/__tests__/services/guards.test.ts
++++ b/packages/practice-cohort/src/__tests__/guards.test.ts
+@@ -1,8 +1,8 @@
+ import type { Practice } from "@attribution-service/data";
+ import { PracticeStatus } from "@attribution-service/data";
+ import { describe, expect, it } from "vitest";
+-import { evaluateGuards } from "../../services/guards";
+-import { SkipReason } from "../../services/skip-reason";
++import { evaluateGuards } from "../guards";
++import { SkipReason } from "../skip-reason";
+ 
+ const buildPractice = (overrides: Record<string, unknown> = {}): Practice =>
+   ({
+diff --git a/packages/practice-cohort/src/__tests__/package-boundary.test.ts b/packages/practice-cohort/src/__tests__/package-boundary.test.ts
+new file mode 100644
+index 00000000..db70e2a8
+--- /dev/null
++++ b/packages/practice-cohort/src/__tests__/package-boundary.test.ts
+@@ -0,0 +1,24 @@
++import { readFileSync } from "node:fs";
++import { describe, expect, it } from "vitest";
++import { SkipReason } from "../skip-reason";
++
++const packageJson = JSON.parse(
++  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
++) as { dependencies?: Record<string, string> };
++
++describe("package boundary", () => {
++  it("declares no observability dependency, so a preview cannot move batch counters", () => {
++    const dependencies = Object.keys(packageJson.dependencies ?? {});
++
++    expect(dependencies).toEqual(["@attribution-service/data"]);
++    expect(dependencies).not.toContain("@pathccm/observability");
++  });
++
++  it("retains all three SkipReason members", () => {
++    expect(Object.keys(SkipReason).sort()).toEqual([
++      "BELOW_REFERRAL_FLOOR",
++      "NO_PRACTICE_CONTACT_EMAIL",
++      "OPTED_OUT",
++    ]);
++  });
++});
+diff --git a/packages/practice-cohort/src/cohort.ts b/packages/practice-cohort/src/cohort.ts
+new file mode 100644
+index 00000000..39ac60c6
+--- /dev/null
++++ b/packages/practice-cohort/src/cohort.ts
+@@ -0,0 +1,31 @@
++import { type Practice, PracticeStatus, practiceRepository } from "@attribution-service/data";
++import type { Cohort, ResolveCohortOptions } from "./types";
++
++const DEFAULT_PAGE_SIZE = 100;
++
++/**
++ * Selects every SOLD practice, paginating to completion.
++ *
++ * Metric emission is the caller's concern: batch-runner passes onPageFetched
++ * and emits its own size gauge, while the dashboard preview passes neither so
++ * a read-only preview cannot move a batch counter.
++ */
++export const resolveCohort = async ({
++  pageSize = DEFAULT_PAGE_SIZE,
++  onPageFetched,
++}: ResolveCohortOptions = {}): Promise<Cohort> => {
++  const practices: Practice[] = [];
++  let cursor: string | undefined;
++  do {
++    const page = await practiceRepository.listPracticesByStatus(
++      PracticeStatus.SOLD,
++      pageSize,
++      cursor,
++    );
++    practices.push(...page.practices);
++    onPageFetched?.();
++    cursor = page.nextCursor;
++  } while (cursor !== undefined);
++
++  return { practices, size: practices.length };
++};
+diff --git a/packages/practice-cohort/src/guards.ts b/packages/practice-cohort/src/guards.ts
+new file mode 100644
+index 00000000..d64e4242
+--- /dev/null
++++ b/packages/practice-cohort/src/guards.ts
+@@ -0,0 +1,24 @@
++import type { Practice } from "@attribution-service/data";
++import { SkipReason } from "./skip-reason";
++import type { GuardDecision, PracticeWithGuardFields } from "./types";
++
++export const hasPracticeContactEmail = (practice: Practice): boolean => {
++  return practice.practiceEmail != null && practice.practiceEmail.trim().length > 0;
++};
++
++// Local stub until NEV-1412 lands the real predicate; consumed via import so
++// the drop-in swap is a one-line change.
++// TODO(NEV-1412): replace with imported predicate from opt-out module.
++export const isPracticeOptedOut = (practice: Practice): boolean => {
++  return (practice as PracticeWithGuardFields).optedOut === true;
++};
++
++export const evaluateGuards = (practice: Practice): GuardDecision => {
++  if (isPracticeOptedOut(practice)) {
++    return { decision: "SKIP", reason: SkipReason.OPTED_OUT };
++  }
++  if (!hasPracticeContactEmail(practice)) {
++    return { decision: "SKIP", reason: SkipReason.NO_PRACTICE_CONTACT_EMAIL };
++  }
++  return { decision: "PROCEED" };
++};
+diff --git a/packages/practice-cohort/src/index.ts b/packages/practice-cohort/src/index.ts
+new file mode 100644
+index 00000000..7ab82044
+--- /dev/null
++++ b/packages/practice-cohort/src/index.ts
+@@ -0,0 +1,4 @@
++export * from "./cohort";
++export * from "./guards";
++export * from "./skip-reason";
++export * from "./types";
+diff --git a/apps/jobs/batch-runner/src/services/skip-reason.ts b/packages/practice-cohort/src/skip-reason.ts
+similarity index 100%
+rename from apps/jobs/batch-runner/src/services/skip-reason.ts
+rename to packages/practice-cohort/src/skip-reason.ts
+diff --git a/packages/practice-cohort/src/types.ts b/packages/practice-cohort/src/types.ts
+new file mode 100644
+index 00000000..b8abee9a
+--- /dev/null
++++ b/packages/practice-cohort/src/types.ts
+@@ -0,0 +1,22 @@
++import type { Practice } from "@attribution-service/data";
++import type { SkipReason } from "./skip-reason";
++
++export type PracticeWithGuardFields = Practice & {
++  optedOut?: boolean;
++};
++
++export type GuardDecision = { decision: "PROCEED" } | { decision: "SKIP"; reason: SkipReason };
++
++export interface ResolveCohortOptions {
++  pageSize?: number;
++  /**
++   * Invoked once per fetched page. The batch uses it to emit its page counter;
++   * the preview omits it so a read-only preview moves no batch metric.
++   */
++  onPageFetched?: () => void;
++}
++
++export interface Cohort {
++  practices: Practice[];
++  size: number;
++}
+diff --git a/packages/practice-cohort/tsconfig.json b/packages/practice-cohort/tsconfig.json
+new file mode 100644
+index 00000000..7cbb69da
+--- /dev/null
++++ b/packages/practice-cohort/tsconfig.json
+@@ -0,0 +1,14 @@
++{
++  "extends": "../../tsconfig.json",
++  "compilerOptions": {
++    "outDir": "./dist",
++    "rootDir": "./src"
++  },
++  "include": ["src/**/*"],
++  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/__tests__/**"],
++  "references": [
++    {
++      "path": "../data"
++    }
++  ]
++}
+diff --git a/packages/practice-cohort/vitest.config.ts b/packages/practice-cohort/vitest.config.ts
+new file mode 100644
+index 00000000..20967134
+--- /dev/null
++++ b/packages/practice-cohort/vitest.config.ts
+@@ -0,0 +1,19 @@
++import { defineProject, mergeConfig } from "vitest/config";
++import { commonConfig } from "../../vitest.config";
++
++export default mergeConfig(
++  commonConfig,
++  defineProject({
++    test: {
++      name: "practice-cohort",
++      coverage: {
++        thresholds: {
++          lines: 90,
++          functions: 90,
++          branches: 85,
++          statements: 90,
++        },
++      },
++    },
++  }),
++);
+diff --git a/packages/practice-cohort/vitest.env.ts b/packages/practice-cohort/vitest.env.ts
+new file mode 100644
+index 00000000..051d9ae8
+--- /dev/null
++++ b/packages/practice-cohort/vitest.env.ts
+@@ -0,0 +1,9 @@
++process.env.NODE_ENV = "test";
++
++process.env.TABLE_NAME = "attribution-service";
++process.env.DDB_ENDPOINT = "http://localhost:4568";
++
++// AWS credentials (fake values for LocalStack - it doesn't validate them)
++process.env.AWS_ACCESS_KEY_ID = "test";
++process.env.AWS_SECRET_ACCESS_KEY = "test";
++process.env.AWS_REGION = "us-west-2";
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index b3ebb108..ef3f05aa 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -68,6 +68,9 @@ importers:
+       '@attribution-service/patient-domain-client':
+         specifier: workspace:^
+         version: link:../../packages/patient-domain-client
++      '@attribution-service/practice-cohort':
++        specifier: workspace:^
++        version: link:../../packages/practice-cohort
+       '@attribution-service/prospect-service-client':
+         specifier: workspace:^
+         version: link:../../packages/prospect-service-client
+@@ -160,6 +163,9 @@ importers:
+       '@attribution-service/pdf-renderer':
+         specifier: workspace:*
+         version: link:../../../packages/pdf-renderer
++      '@attribution-service/practice-cohort':
++        specifier: workspace:*
++        version: link:../../../packages/practice-cohort
+       '@attribution-service/practice-report':
+         specifier: workspace:*
+         version: link:../../../packages/practice-report
+@@ -317,6 +323,22 @@ importers:
+         specifier: ^4.4.3
+         version: 4.4.3
+ 
++  packages/practice-cohort:
++    dependencies:
++      '@attribution-service/data':
++        specifier: workspace:^
++        version: link:../data
++    devDependencies:
++      '@aws-sdk/client-dynamodb':
++        specifier: ^3.1096.0
++        version: 3.1096.0
++      vitest:
++        specifier: ^4.1.2
++        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.2)(@vitest/coverage-v8@4.1.10)(@vitest/ui@4.1.10)(vite@8.1.4(@types/node@26.1.2)(esbuild@0.28.1)(tsx@4.23.1)(yaml@2.9.0))
++      zod:
++        specifier: ^4.4.3
++        version: 4.4.3
++
+   packages/practice-report:
+     dependencies:
+       '@attribution-service/data':
