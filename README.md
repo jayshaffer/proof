@@ -68,7 +68,7 @@ The stages can also be run individually:
 
 ```sh
 node generator/ingest-diff.js <data.json> <raw.diff> [out.json]
-node validate.js <data.json>
+node validate.js <data.json> [--inputs <pr-title-body-commits.txt>]
 node generate.js <data.json> [out.html]
 ```
 
@@ -106,6 +106,13 @@ must resolve to a valid code anchor, `divergeAt` must be in range, and no two de
 rest on the same evidence hunk. When a coverage map is present, it also checks that every
 non-context anchored file is accounted for in exactly one bucket (explained, mechanical,
 tests, or unexplained) and that the diff attribution agrees with the spine.
+
+With `node validate.js <data.json> --inputs <file>`, author quotes are also checked verbatim
+(case- and whitespace-insensitive) against the PR title, body, and commit messages in `<file>`
+— a quote that doesn't actually appear in the inputs is a validation error, not just a
+missing-field check. `proof.sh` passes this automatically, built from the same `gh pr view`
+and commit-log data used for generation. Without `--inputs`, validation still runs but prints
+a warning that quotes were not checked.
 
 The intended flow is generate → author corrects → publish. The generator drafts; the author
 is the first verifier. An inferred decision the author confirms becomes author-stated.

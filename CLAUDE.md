@@ -63,7 +63,7 @@ Bedrock creds needed) — the mechanical path for tuning and testing. Individual
 
 ```sh
 node generator/ingest-diff.js <data.json> <raw.diff> [out.json]
-node validate.js <data.json>
+node validate.js <data.json> [--inputs <pr-title-body-commits.txt>]
 node generate.js <data.json> [out.html]
 ```
 
