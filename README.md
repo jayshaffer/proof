@@ -167,6 +167,20 @@ The skill resolves its scripts via `${CLAUDE_PLUGIN_ROOT}` (Claude Code substitu
 install path into the skill content) and writes the ledger + HTML to `./proof-out/` in whatever
 repo you invoke it from.
 
+### Author verification
+
+A ledger-derived decision's provenance tier is derived from its events (`docs/ledger-schema.md`),
+so raising it is one more event, not a UI: a `by: human` `verify` on an already-`realize`d
+decision raises its tier to `author-verified` — the tier a walkthrough should reach before it is
+published as trusted.
+
+```sh
+node generator/ledger-cli.js append --ledger <ledger.jsonl> --commit <head-sha> \
+  --event '{"event":"verify","id":"D3","by":"human","ticket":"<TICKET>","phase":"review",
+            "reason":"I wrote this; the fail-closed gate is exactly as described"}'
+./retrofit.sh <ledger.jsonl> <pr> --repo owner/name
+```
+
 ## Stacks — one walkthrough for a chain of PRs
 
 Work often ships as a **stack**: a chain of PRs where each one's head branch is the next one's
@@ -243,9 +257,12 @@ delivery and verification:
 - **Delivery.** GitHub serves committed HTML as `text/plain`, so a committed walkthrough is
   not viewable in the PR. CI works around this with a downloadable artifact plus a comment
   link. A hosted renderer that ships only per-PR JSON is the likely long-term answer.
-- **Verification.** CI generation has no author in the loop. `validate.js` checks that a
-  quote is present, not that it is verbatim in the inputs, so an unverified walkthrough can
-  pass validation. Treat CI-generated output as a draft until the author has reviewed it.
+- **Verification.** CI generation has no author in the loop. `proof.sh` now checks author
+  quotes verbatim against the PR inputs (see "Provenance and validation"), so a fabricated
+  quote fails validation rather than passing silently — but no one has confirmed the
+  *reasoning* is right. `generator/confirm.js` (v1) and a `by: human` `verify` event (v2,
+  see "Author verification" above) are the correction mechanisms; until an author has run
+  one, treat CI-generated output as a draft.
 - **Reviewer affordances.** The walkthrough is read-only. Marking a decision understood or
   disputed, and anchoring a question to a behaviour scenario, are not built.
 

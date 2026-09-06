@@ -65,6 +65,7 @@ Bedrock creds needed) — the mechanical path for tuning and testing. Individual
 node generator/ingest-diff.js <data.json> <raw.diff> [out.json]
 node validate.js <data.json> [--inputs <pr-title-body-commits.txt>]
 node generate.js <data.json> [out.html]
+node generator/confirm.js <data.json> <decision-id> --quote "..." --src "..."  # v1 only
 ```
 
 `validate.js` enforces provenance mechanically (exits non-zero): author-stated needs a quote,
