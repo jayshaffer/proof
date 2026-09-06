@@ -92,10 +92,20 @@
             "file": { "type": "string", "minLength": 1 },
             "lines": { "type": "string" },
             "context": { "type": "boolean" },
-            "hl": { "type": "array", "items": { "type": "integer" } }
+            "hl": { "type": "array", "items": { "type": "integer" } },
+            "rows": { "type": "array", "items": { "$ref": "#/$defs/row" } }
           }
         }
       }
+    },
+    "row": {
+      "type": "array",
+      "minItems": 3,
+      "items": [
+        { "type": ["string", "integer"] },
+        { "type": "string" },
+        { "type": "integer" }
+      ]
     },
     "coverage": {
       "type": "object",
