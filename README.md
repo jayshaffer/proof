@@ -74,22 +74,23 @@ node generate.js <data.json> [out.html]
 
 ## The rendered walkthrough
 
-The page has three tabs. It opens on **Behaviour**, so the reviewer's first screen is
-checkable against code rather than a claim to be trusted.
+The page has three tabs, all derived from the same decision spine. It opens on **Diff** when
+the PR has one, so the reviewer's first screen is the real unified diff rather than a claim
+to be trusted; it falls back to **Behaviour** when there are runtime scenarios but no diff,
+and to **Decisions** when there is neither (a pure framing or scope change).
 
+- **Diff** — the real unified diff, each line tinted by its coverage bucket. Explained lines
+  link to the decision behind them. The diff is computed from the spine and coverage map, so
+  it cannot desync from the decisions.
 - **Behaviour** — each runtime scenario the change touches, classified `CHANGED`, `NEW`, or
   `UNCHANGED`. `CHANGED` scenarios render before and after side by side with a divergence
   marker naming the `file:line` where the two paths split; on a bugfix, that line is the fix.
 - **Decisions** — what the author chose, what they rejected, and why. Each decision is tagged
   **author-stated** (with a verbatim quote and its source) or **AI-inferred** (with a note on
   what is reconstructed). Deliberate non-changes count as decisions.
-- **Diff** — the real unified diff, each line tinted by its coverage bucket. Explained lines
-  link to the decision behind them. The diff is computed from the spine and coverage map, so
-  it cannot desync from the decisions.
 
 Behaviour and Diff are derived from the decisions and their evidence — never authored
-separately. When a PR has no runtime scenarios (a pure framing or scope change), the
-Behaviour tab is absent and the page opens on Decisions.
+separately.
 
 ## Provenance and validation
 
