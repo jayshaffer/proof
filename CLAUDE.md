@@ -51,9 +51,10 @@ Three tabs, built by `generate.js`:
   that reveals the decision behind a clicked line.
 
 Behaviour and Diff are **derived** from the decisions + evidence — never authored separately,
-so they can't desync from the spine. Default tab logic lives at `generate.js:~427`: opens on
-Behaviour when scenarios exist, else Decisions. This ordering is a documented design decision
-(the first screen should be checkable against code) — changing it overrides `docs/design.md`.
+so they can't desync from the spine. Default tab logic lives at `generate.js:~785`: opens on
+Diff when the PR has one, else Behaviour when scenarios exist, else Decisions. Diff-first is a
+documented design decision (the first screen should be the real diff, not a claim to be
+trusted) — changing it overrides `docs/design.md`.
 
 ## Pipeline
 
