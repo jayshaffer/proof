@@ -54,7 +54,14 @@ function signalOf(e) {
   if (e.by === "retrofit") return inReview(e) ? "through-review" : "reconstructed";
   if (e.event === "confirm" && e.by === "human") return "author-confirmed";
   if (e.event === "verify") return e.by === "human" ? "author-verified" : "machine-verified";
-  return inReview(e) ? "through-review" : "first-hand";
+  if (inReview(e)) return "through-review";
+  // A non-review event still has to earn `first-hand` — `by: "agent"` alone is
+  // an assertion, not evidence. `observedAt` (the commit the work happened at,
+  // stamped by a hook at edit time) must agree with `commit` (the commit when
+  // the event was written) before the claim is trusted. No match, or no
+  // observedAt at all — an end-of-run memory dump, say — degrades to
+  // `reconstructed`: the same tier a retrofit gets, which is what this is.
+  return e.observedAt && e.observedAt === e.commit ? "first-hand" : "reconstructed";
 }
 
 // A confirm/verify attests the decision as it stood when written; a later
