@@ -491,10 +491,13 @@ function renderDecisionV2(d, i, opts) {
 }
 
 function mdListItemV2(d, i) {
-  const flag = `<span class="di-flag infer" title="${esc(d.provenance)}">${d.isReject ? "declined" : esc(d.provenance)}</span>`;
+  // A dedicated class, not v1's "infer": v2 tier words ("reconstructed",
+  // "through-review", "author-verified") run longer than v1's fixed
+  // "inferred" and need to wrap onto their own line instead of clipping.
+  const flag = `<span class="di-flag tier" title="${esc(d.provenance)}">${d.isReject ? "declined" : esc(d.provenance)}</span>`;
   return `<button class="di" data-idx="${i}">
     <span class="di-num">${d.isReject ? "✕" : i + 1}</span>
-    <span class="di-body"><span class="di-title">${esc(d.title)}</span>${flag}</span>
+    <span class="di-body v2"><span class="di-title">${esc(d.title)}</span>${flag}</span>
   </button>`;
 }
 
