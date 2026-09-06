@@ -1,5 +1,11 @@
 # Plan: live decision capture — the `/decision-log` emitter
 
+> **Status:** Phase 1 (the honest floor — `observedAt`, the `first-hand` degrade, the
+> `by: human` attestation gate) and Phase 2 (the emitter) are **built**: `generator/ledger-cli.js`,
+> `generator/reduce-ledger.js`, `generator/decision-log.js`, `skills/decision-log/SKILL.md`
+> (invoked as `/proof:decision-log`). Phase 3 (the three hooks) and Phase 4 (an instrumented
+> real ticket) are still open — see their sections below, unchanged.
+
 ## The thesis
 
 `docs/retrofit-ledger.md` names the one thing reconstruction structurally cannot reach:
