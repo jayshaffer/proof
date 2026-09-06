@@ -6,7 +6,8 @@
  * stamping, supersedes resolution, and the schema gate. A schema-invalid or
  * dangling event is never appended.
  *
- * Shared by the Tier-1 retrofit reducer and the Tier-3 live /decision-log skill.
+ * Shared by the Tier-1 retrofit reducer and the Tier-3 live /proof:decision-log
+ * skill (skills/decision-log/SKILL.md, generator/decision-log.js).
  *
  * CLI:  node ledger-cli.js append --ledger <path> [--commit <sha>] --event '<json>'
  *       node ledger-cli.js human-attest --ticket <t> [--kind confirm|verify|any] [--commit <sha>]
