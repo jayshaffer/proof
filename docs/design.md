@@ -113,7 +113,9 @@ than a long PR description.
 ## Settled vs. open
 
 **Settled:** two tracks, one at a time; behaviour-first; PR-scoped; decisions with rejected
-alternatives; the provenance split; trace-as-code-path; author verifies before publishing.
+alternatives; the provenance split; trace-as-code-path; author verifies before publishing;
+generation backend is pluggable and auto-detected from what's on PATH (`aws` → bedrock, else
+`opencode`; override with `--backend`, see `proof.sh`) rather than hardcoded to one provider.
 
 **Open:**
 
