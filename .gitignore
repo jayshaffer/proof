@@ -10,5 +10,6 @@ protos/*.html
 .proof/human-attest.jsonl
 .proof/observations.jsonl
 .proof/state.json
+.proof/stop-gate.json
 
 .DS_Store
