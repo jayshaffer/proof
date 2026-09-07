@@ -75,6 +75,20 @@ function currentBranch() {
   }
 }
 
+// The commit an anchor's line range was drawn against — not a claim about
+// when the work happened (that's observedAt, which this tool never sets),
+// just enough for a later reader to know which version of the file "lines
+// 10-14" refers to. Without this, a superseded anchor retired into history
+// (reduce-ledger.js's foldDecision) is unlabeled: a reader can tell it's old
+// but not old *as of what*.
+function gitHead() {
+  try {
+    return execFileSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
 // A Jira-style key at the start of the branch name ("NEV-1645-add-x" -> "NEV-1645");
 // falls back to the whole branch name for repos that don't name branches that way.
 function deriveTicketFromBranch(branch) {
@@ -121,6 +135,7 @@ function parseAnchor(spec, opts) {
     }
   }
   if (opts.divergeAt && anchor.role === "divergence") anchor.divergeAt = opts.divergeAt;
+  if (opts.sha) anchor.sha = opts.sha;
   return anchor;
 }
 
@@ -164,7 +179,10 @@ function buildEvent(event, a, ticket, phase) {
   if (a.ac) ev.ac = a.ac.split(",").map((s) => s.trim()).filter(Boolean);
   if (a.reason) ev.reason = a.reason;
   if (a.supersedes) ev.supersedes = a.supersedes;
-  if (a.anchors.length) ev.anchors = a.anchors.map((s) => parseAnchor(s, { role: a.role, divergeAt: a["diverge-at"] }));
+  if (a.anchors.length) {
+    const sha = gitHead();
+    ev.anchors = a.anchors.map((s) => parseAnchor(s, { role: a.role, divergeAt: a["diverge-at"], sha }));
+  }
   if (a.tests.length) ev.tests = a.tests.map(parseTest);
   return ev;
 }

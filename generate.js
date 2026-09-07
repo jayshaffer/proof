@@ -458,13 +458,25 @@ function renderDecisionV2(d, i, opts) {
   const evidence = evList
     ? `<div class="evidence"><div class="ev-lbl">${d.isReject ? "Where it applies" : "Evidence"}</div>${evList}</div>`
     : "";
+  // A superseded state's own anchors (reduce-ledger.js's foldDecision retires
+  // them here, out of the live `evidence` array, precisely so they stop being
+  // resolved against the final diff). Rendered as a plain file:lines
+  // reference, never as code — showing code here would need the diff as of
+  // this state's own commit, which nothing in the pipeline resolves, and
+  // re-filling it from the final diff is the exact bug this retirement fixes.
+  const histAnchorsRef = (anchors) =>
+    anchors && anchors.length
+      ? `<div class="nbox">as of this state, referenced: ${anchors
+          .map((a) => esc(`${a.file}:${a.lines}${a.sha ? ` @ ${a.sha}` : ""}`))
+          .join(", ")} (code not shown — resolving it needs the diff as of that commit)</div>`
+      : "";
   const hist = (d.history || []).length
     ? `<details class="histbox"><summary>Superseded — ${d.history.length} earlier state${d.history.length > 1 ? "s" : ""}</summary>${(d.history || [])
         .map(
           (h) =>
             `<div class="hist-entry">${h.chose ? `<p class="dd-chose">${richText(h.chose)}</p>` : ""}${
               h.why ? `<p class="why">${richText(h.why)}</p>` : ""
-            }${h.reason ? `<div class="nbox">changed: ${esc(h.reason)}</div>` : ""}</div>`,
+            }${h.reason ? `<div class="nbox">changed: ${esc(h.reason)}</div>` : ""}${histAnchorsRef(h.anchors)}</div>`,
         )
         .join("")}</details>`
     : "";
