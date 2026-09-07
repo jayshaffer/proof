@@ -13,8 +13,9 @@ Everything is an **append-only JSONL** line — one event per line, written in `
 mutated or deleted. A *decision* is not stored: it is the reduction of the events sharing an
 `id`. Events are the source of truth; decisions are a view.
 
-Transport: `.proof/ledger.jsonl`, committed to the branch. proof excludes this file from its own
-coverage map.
+Transport: `.proof/ledgers/<ticket>.ledger.jsonl` — one file per initiative/PR
+(`generator/ledger-paths.js`), committed to that PR's branch, not one growing file shared across
+every ticket a repo ever works. proof excludes this directory from its own coverage map.
 
 **Contract header.** The stream opens with a bare header line naming the contract; event lines
 follow. A consumer negotiates the major it sees and fails closed on an unsupported one.

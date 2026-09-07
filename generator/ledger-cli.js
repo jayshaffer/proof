@@ -98,10 +98,27 @@ function lastSeqOfId(lines, id) {
 
 function gitHead(dir) {
   try {
-    return execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim();
+    // stdio: an unborn HEAD (no commit yet) makes `rev-parse` fail with
+    // "fatal: Needed a single revision" on stderr — a real, unremarkable case
+    // (working before a repo's first commit), not something worth leaking to
+    // the terminal on the way to the same "0000000" fallback below.
+    return execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
   } catch {
     return "0000000";
   }
+}
+
+function nearestExistingDir(dir) {
+  let d = path.resolve(dir);
+  while (!fs.existsSync(d)) {
+    const parent = path.dirname(d);
+    if (parent === d) return d; // reached filesystem root without finding one
+    d = parent;
+  }
+  return d;
 }
 
 // Append one event, resolving all bookkeeping. Returns the written event so the
@@ -142,7 +159,12 @@ function appendEvent(ledgerPath, ev, opts = {}) {
   }
 
   out.seq = nextSeq(lines);
-  if (!out.commit) out.commit = opts.commit || gitHead(path.dirname(ledgerPath));
+  // git -C <dir> needs `dir` to exist on disk. Ledgers now nest under
+  // .proof/ledgers/ (one file per ticket), which doesn't exist yet on a
+  // ticket's first event — walk up to the nearest ancestor that does exist
+  // rather than mkdir this early, so a schema-invalid event (thrown below,
+  // never appended) doesn't still leave an empty directory behind.
+  if (!out.commit) out.commit = opts.commit || gitHead(nearestExistingDir(path.dirname(ledgerPath)));
 
   const errs = check(LEDGER_SCHEMA, out);
   if (errs.length) {
