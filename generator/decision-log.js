@@ -9,8 +9,10 @@
  *
  * Ticket and phase are sticky in .proof/state.json: set once (--ticket,
  * --phase), reused on every later call for this ticket until overridden.
- * Ledger defaults to .proof/ledger.jsonl, the path docs/ledger-schema.md
- * commits to committing.
+ * Ledger defaults to .proof/ledgers/<ticket>.ledger.jsonl (generator/ledger-
+ * paths.js) — one file per initiative/PR, not one growing file per repo, so
+ * a ticket's ledger stays small enough to review and commit alongside that
+ * PR's own diff (docs/ledger-schema.md). Pass --ledger to override.
  *
  * This tool never sets `observedAt` and never accepts `--by human`. Both are
  * exactly the laundering the ladder exists to prevent — see
@@ -44,15 +46,13 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { appendEvent } = require("./ledger-cli");
+const { ledgerPath: ledgerPathForTicket } = require("./ledger-paths");
 
 const PHASES = ["plan", "execute", "review", "copilot"];
 const ID_EVENTS = ["realize", "revise", "verify", "confirm"]; // take a positional <id>
 
 function defaultStatePath() {
   return path.join(process.cwd(), ".proof", "state.json");
-}
-function defaultLedgerPath() {
-  return path.join(process.cwd(), ".proof", "ledger.jsonl");
 }
 
 function readState(p) {
@@ -220,11 +220,11 @@ function main() {
     }
 
     const statePath = a.state || defaultStatePath();
-    const ledgerPath = a.ledger || defaultLedgerPath();
     const state = readState(statePath);
     const ticket = resolveTicket(a, state);
     const phase = resolvePhase(a, state);
     writeState(statePath, { ...state, ticket, phase });
+    const ledgerPath = a.ledger || ledgerPathForTicket(process.cwd(), ticket);
 
     const event = buildEvent(cmd, a, ticket, phase);
     const written = appendEvent(ledgerPath, event, { attestPath: a["attest-path"] });

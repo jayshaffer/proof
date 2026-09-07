@@ -7,9 +7,17 @@
  * reconciles against a known list instead of free-associating about what
  * was worth logging.
  *
+ * Ledgers are one-per-ticket (generator/ledger-paths.js), so this resolves
+ * the same current-ticket a decision-log.js call would (sticky
+ * .proof/state.json, else the branch name) and checks only that ticket's
+ * file — reconciling against the initiative actually in flight, not
+ * everything any ticket ever left open in this repo. If no ticket can be
+ * resolved (no state, no branch), it falls back to scanning every ledger
+ * under .proof/ledgers/ rather than silently skipping a real open decision.
+ *
  * Two guards, both load-bearing:
  *
- * 1. Inert with no ledger. If .proof/ledger.jsonl doesn't exist for this
+ * 1. Inert with no ledgers. If .proof/ledgers/ doesn't exist for this
  *    project, exit 0 immediately — every repo that hasn't opted into live
  *    capture is completely unaffected.
  *
@@ -29,13 +37,56 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { execFileSync } = require("child_process");
 const { readLines, events } = require("../generator/ledger-cli");
+const { ledgerPath: ledgerPathForTicket, ledgerDir } = require("../generator/ledger-paths");
 
 const MAX_CONSECUTIVE_BLOCKS = 3;
 const TERMINAL = ["realize", "revise", "reject"];
 
 function readStdin() {
   return fs.readFileSync(0, "utf8");
+}
+
+// Same rule as generator/decision-log.js's resolveTicket/deriveTicketFromBranch
+// (duplicated rather than imported — see hooks/record-approval.js, which
+// duplicates it for the same reason: a hook shouldn't depend on decision-log.js's
+// CLI-parsing internals just to reuse two small pure functions).
+function deriveTicketFromBranch(branch) {
+  const m = branch.match(/^[A-Z][A-Z0-9]*-\d+/);
+  return m ? m[0] : branch;
+}
+
+function currentTicket(cwd) {
+  try {
+    const state = JSON.parse(fs.readFileSync(path.join(cwd, ".proof", "state.json"), "utf8"));
+    if (state.ticket) return state.ticket;
+  } catch {
+    // no sticky state — fall through to the branch
+  }
+  try {
+    const branch = execFileSync("git", ["-C", cwd, "branch", "--show-current"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return branch ? deriveTicketFromBranch(branch) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Fallback when no ticket can be resolved at all: check every ledger under
+// .proof/ledgers/ rather than silently skip a real open decision.
+function allLedgerPaths(cwd) {
+  const dir = ledgerDir(cwd);
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".ledger.jsonl"))
+      .map((f) => path.join(dir, f));
+  } catch {
+    return [];
+  }
 }
 
 function openIds(lines) {
@@ -64,17 +115,27 @@ function main() {
     // still lets the ledger check run
   }
   const cwd = input.cwd || process.cwd();
-  const ledgerPath = path.join(cwd, ".proof", "ledger.jsonl");
-  if (!fs.existsSync(ledgerPath)) return; // guard 1: not opted in
+  if (!fs.existsSync(ledgerDir(cwd))) return; // guard 1: not opted in
 
-  let lines;
-  try {
-    lines = readLines(ledgerPath);
-  } catch {
-    return; // an unreadable ledger is not this hook's problem to fix
+  const ticket = currentTicket(cwd);
+  const paths = ticket ? [ledgerPathForTicket(cwd, ticket)] : allLedgerPaths(cwd);
+  if (!paths.length) return;
+
+  const multi = paths.length > 1;
+  const open = [];
+  for (const p of paths) {
+    if (!fs.existsSync(p)) continue; // this ticket's ledger doesn't exist yet
+    let lines;
+    try {
+      lines = readLines(p);
+    } catch {
+      continue; // an unreadable ledger is not this hook's problem to fix
+    }
+    const label = path.basename(p).replace(/\.ledger\.jsonl$/, "");
+    for (const id of openIds(lines)) open.push(multi ? `${id} (${label})` : id);
   }
-  const open = openIds(lines);
   if (!open.length) return;
+  open.sort();
 
   const guardPath = path.join(cwd, ".proof", "stop-gate.json");
   const key = open.join(",");

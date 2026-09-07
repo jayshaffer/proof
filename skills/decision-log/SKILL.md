@@ -1,6 +1,6 @@
 ---
 name: decision-log
-description: Log a decision to the live decision ledger as you make it, during active ticket work — not after the fact. Use at each phase of a real task: propose decisions while planning, realize/revise/reject them while implementing, verify/revise/reject them in review, close when done. Produces a proof.ledger/v1 ledger (.proof/ledger.jsonl) that renders as a proof walkthrough with no reconstruction in it. Do not use this to log decisions from memory after work is finished — that is what /proof:retrofit-ledger is for, and it is honestly capped at a lower provenance tier for exactly that reason.
+description: Log a decision to the live decision ledger as you make it, during active ticket work — not after the fact. Use at each phase of a real task: propose decisions while planning, realize/revise/reject them while implementing, verify/revise/reject them in review, close when done. Produces a proof.ledger/v1 ledger (.proof/ledgers/<ticket>.ledger.jsonl — one file per initiative/PR) that renders as a proof walkthrough with no reconstruction in it. Do not use this to log decisions from memory after work is finished — that is what /proof:retrofit-ledger is for, and it is honestly capped at a lower provenance tier for exactly that reason.
 ---
 
 # Log a decision as you make it
@@ -141,6 +141,6 @@ evidence is not, and that's the one failure mode this whole design exists to pre
 ## Output
 
 After logging, report which decisions you proposed/realized/revised/rejected/verified and their
-ids, so anyone reading the transcript can find them in `.proof/ledger.jsonl`. If a human needs to
+ids, so anyone reading the transcript can find them in `.proof/ledgers/<ticket>.ledger.jsonl`. If a human needs to
 confirm or verify something, say so explicitly and give them the exact command — don't run it
 for them.

@@ -104,6 +104,16 @@ function gitHead(dir) {
   }
 }
 
+function nearestExistingDir(dir) {
+  let d = path.resolve(dir);
+  while (!fs.existsSync(d)) {
+    const parent = path.dirname(d);
+    if (parent === d) return d; // reached filesystem root without finding one
+    d = parent;
+  }
+  return d;
+}
+
 // Append one event, resolving all bookkeeping. Returns the written event so the
 // caller learns the minted id / assigned seq. Throws (never appends) on a
 // dangling reference or a schema violation.
@@ -142,7 +152,12 @@ function appendEvent(ledgerPath, ev, opts = {}) {
   }
 
   out.seq = nextSeq(lines);
-  if (!out.commit) out.commit = opts.commit || gitHead(path.dirname(ledgerPath));
+  // git -C <dir> needs `dir` to exist on disk. Ledgers now nest under
+  // .proof/ledgers/ (one file per ticket), which doesn't exist yet on a
+  // ticket's first event — walk up to the nearest ancestor that does exist
+  // rather than mkdir this early, so a schema-invalid event (thrown below,
+  // never appended) doesn't still leave an empty directory behind.
+  if (!out.commit) out.commit = opts.commit || gitHead(nearestExistingDir(path.dirname(ledgerPath)));
 
   const errs = check(LEDGER_SCHEMA, out);
   if (errs.length) {

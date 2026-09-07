@@ -171,10 +171,13 @@ observation time. Byte-level fingerprinting stays deferred; it does not block th
 
 ## Scratch state, and what gets committed
 
-`.proof/ledger.jsonl` is committed to the branch, as already decided. The observation log and
-approval state are **not** — they are working files under `.proof/` that the ledger distills
-from, and committing them would put a noisy, merge-conflict-prone artifact in every PR for no
-reader benefit. They are gitignored; only the ledger travels.
+`.proof/ledgers/<ticket>.ledger.jsonl` is committed to the branch, as already decided — one file
+per initiative/PR (`generator/ledger-paths.js`, added when a single repo-wide `.proof/ledger.jsonl`
+turned out to mix every ticket's decisions into one file with no way to scope a walkthrough to
+just the PR it's about). The observation log and approval state are **not** committed — they are
+working files under `.proof/` that the ledger distills from, and committing them would put a
+noisy, merge-conflict-prone artifact in every PR for no reader benefit. They are gitignored; only
+the ledger(s) travel.
 
 ## Phases
 
