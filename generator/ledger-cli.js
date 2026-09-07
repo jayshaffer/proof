@@ -98,7 +98,14 @@ function lastSeqOfId(lines, id) {
 
 function gitHead(dir) {
   try {
-    return execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim();
+    // stdio: an unborn HEAD (no commit yet) makes `rev-parse` fail with
+    // "fatal: Needed a single revision" on stderr — a real, unremarkable case
+    // (working before a repo's first commit), not something worth leaking to
+    // the terminal on the way to the same "0000000" fallback below.
+    return execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
   } catch {
     return "0000000";
   }
