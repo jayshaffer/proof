@@ -237,6 +237,54 @@ but how many `revise` events exist on the live side and are simply absent from t
 that difference is the entire argument for the feature, and it should be measured rather than
 assumed.
 
+**Dry run (2026-09-06).** A synthetic ticket (`NEV-4201`, skip disabled accounts in a billing
+batch and make charging idempotent), worked end to end with `/proof:decision-log` in a scratch
+repo: 3 decisions proposed, realized, one genuinely revised mid-execution (a real technical
+dead end — an in-memory Set doesn't survive a process restart — not a scripted example), one
+alternative explicitly declined, all three verified against real passing tests, then closed.
+The same final diff was then reconstructed blind via `/proof:retrofit-ledger`'s own procedure
+(ticket + commit titles + diff only, no access to the live ledger).
+
+Result: both ledgers found the same 3 decisions and both noticed the `revise` — the retrofit
+skill's "mine commit messages" instruction is good enough to catch *that* an approach changed
+from two commit titles. What retrofit could not do:
+
+- **State *why* it changed.** Live: "an in-memory Set only survives the current process; a
+  crash mid-batch followed by a restart would re-charge everything charged before the crash —
+  the exact bug AC-3 exists to prevent, just moved to a different trigger." Retrofit, honestly:
+  "the commit messages state the approach changed... but do not state why." The causal
+  reasoning was never written down anywhere retrofit can reach — exactly the ceiling
+  `docs/retrofit-ledger.md` names.
+- **See the declined alternative at all.** The live ledger has a `reject` (a shared
+  retry-tracking service, considered and declined as out of scope). Nothing in the diff or the
+  commit messages shows this deliberation ever happened, so the retrofit ledger has no
+  equivalent event — not a weaker version of it, a complete absence. This is the starker of
+  the two findings: a revise retrofit can sometimes infer from titles; a reject with no
+  artifact trace it cannot infer from anything.
+- **Provenance.** Live: 3 `machine-verified` (real `verify` events against real test runs).
+  Retrofit: 3 `reconstructed`, correctly capped since no review artifacts existed to check.
+
+Two bugs surfaced by actually running this, neither found by the unit-level tests in Phases
+1-3, both worth fixing before Phase 4 is called done:
+
+1. **A superseded `realize`'s anchor renders as if it still described current code.**
+   `reduce-ledger.js`'s `foldDecision` accumulates every event's anchors into one flat
+   `evidence` list and never retires the pre-`revise` anchor. In the dry run, d2's evidence
+   showed two cards for `billing/run-batch.js` — one at the original `realize`'s line range,
+   one at the `revise`'s — both resolving against the *final* diff, so the "old" card actually
+   rendered current code, not what the file looked like when that state was true. Reads as
+   two near-identical, redundant cards, not as history. `docs/ledger-schema.md`'s "anchors
+   must survive rebase" note already flags the general problem (anchors should carry `sha` and
+   be reconciled, not blindly matched against final HEAD); this is a concrete instance of it.
+   Likely fix: an anchor's `code.rows` should fill from the diff *between the anchor's own
+   commit and HEAD* when available, or a superseded state's anchors should render inside the
+   `history` disclosure rather than the live `evidence` list.
+2. **`generator/decision-log.js` never stamps a `sha` on an anchor.** Only the event-level
+   `commit` field exists. Without a per-anchor `sha`, there is no way to implement the fix
+   above precisely — reconciliation needs to know which commit an anchor was captured at, not
+   just which commit the enclosing event was written at (usually the same commit, but not
+   always, and not enough to disambiguate anchors across a `revise`).
+
 ## Open questions
 
 - **Does the Stop gate hold across sessions?** A ticket spans several sessions; the gate fires

@@ -285,6 +285,20 @@ TITLE="$(jq -r '.title' "$META_JSON")"
 DIFF_LINES="$(grep -cE '^[+-]' "$DIFF_PATCH" || true)"
 echo "    head=${HEAD_SHA:0:7} base=${BASE_SHA:0:7} · ${DIFF_LINES} changed lines"
 
+# Commit messages are author-stated provenance; both the generation prompt and
+# the verbatim quote check (stage 4) mine them, so compute this once here —
+# needed in the --data bypass path too, not just the model path.
+COMMITS="$(git -C "$HERE" log "${BASE_SHA}..${HEAD_SHA}" --format='%h %s%n%b' 2>/dev/null || echo '(commit log unavailable — repo not checked out at these SHAs)')"
+
+# Inputs the validator checks author quotes against — title, body, commits.
+# Not the diff: a quote is the author's stated reasoning, never diff text.
+INPUTS_TXT="$TMP/pr-$PR.inputs.txt"
+{
+  jq -r '.title, (.body // "")' "$META_JSON"
+  echo
+  echo "$COMMITS"
+} > "$INPUTS_TXT"
+
 # --- 2. generate --------------------------------------------------------------
 if [ -n "$DATA" ]; then
   echo "· [2/5] generate — bypassed, using $DATA"
@@ -292,9 +306,6 @@ if [ -n "$DATA" ]; then
   cp "$DATA" "$DATA_JSON"
 else
   echo "· [2/5] generate — $BACKEND${MODEL:+ ($MODEL)}"
-  # Commit messages are author-stated provenance; the generation prompt mines
-  # them, so inline the full body of every commit on the branch.
-  COMMITS="$(git -C "$HERE" log "${BASE_SHA}..${HEAD_SHA}" --format='%h %s%n%b' 2>/dev/null || echo '(commit log unavailable — repo not checked out at these SHAs)')"
 
   # Fence author-controlled text (title/body/diff) with a backtick run longer
   # than any inside it, so a crafted description can't pose as prompt structure.
@@ -418,7 +429,7 @@ node "$HERE/generator/ingest-diff.js" "$DATA_JSON" "$DIFF_PATCH"
 
 # --- 4. validate --------------------------------------------------------------
 echo "· [4/5] validate — provenance + evidence + coverage"
-if ! node "$HERE/validate.js" "$DATA_JSON"; then
+if ! node "$HERE/validate.js" "$DATA_JSON" --inputs "$INPUTS_TXT"; then
   echo
   echo "❌ validation failed — not rendering. Fix the data/prompt and re-run." >&2
   # In CI this stdout becomes the PR comment body (see .github/workflows/proof.yml).

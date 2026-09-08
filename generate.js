@@ -60,15 +60,19 @@ const stepText = (s) =>
     .replace(/&lt;span class=\\?"kw\\?"&gt;/g, "<span class='kw'>")
     .replace(/&lt;\/span&gt;/g, "</span>");
 
-function renderCode(code) {
-  if (!code) return "";
-  const rows = (code.rows || [])
+function renderCodeRows(code) {
+  return (code.rows || [])
     .map(([n, t, add]) => {
       const hl =
         code.hl && code.hl.length && +n >= code.hl[0] && +n <= code.hl[1] ? " hl" : "";
       return `<div class="cl${add ? " add" : ""}${hl}"><span class="ln">${esc(n)}</span><span class="ct">${esc(t)}</span></div>`;
     })
     .join("");
+}
+
+function renderCode(code) {
+  if (!code) return "";
+  const rows = renderCodeRows(code);
   const url = ghUrl(code);
   const fileLabel = `<span class="fp">${esc(code.file)}</span><span>${esc(code.lines)}</span>`;
   const header = url
@@ -446,9 +450,14 @@ function renderEvidenceV2(ev) {
   const head = url
     ? `<a class="ev-file-link" href="${esc(url)}" target="_blank" rel="noopener">${label}<span class="gh-glyph" title="View on GitHub">↗</span></a>`
     : label;
-  return `<div class="code-wrap"><div class="ev-block"><div class="ev-file"><span class="role-badge">${esc(ev.kind)}</span>${head}${
+  const header = `<div class="ev-file"><span class="role-badge">${esc(ev.kind)}</span>${head}${
     ev.code.context ? '<span class="ctx-badge">context · not under review</span>' : ""
-  }</div></div></div>`;
+  }</div>`;
+  // A line-pinned retrofit anchor carries rows (see ingest-diff.js fillV2Rows) —
+  // show the code, same as v1. A "~" anchor has none; keep the header-only card.
+  const hasRows = Array.isArray(ev.code.rows) && ev.code.rows.length > 0;
+  const body = hasRows ? `${header}<pre class="code">${renderCodeRows(ev.code)}</pre>` : header;
+  return `<div class="code-wrap"><div class="ev-block">${body}</div></div>`;
 }
 
 function renderDecisionV2(d, i, opts) {
@@ -503,10 +512,13 @@ function renderDecisionV2(d, i, opts) {
 }
 
 function mdListItemV2(d, i) {
-  const flag = `<span class="di-flag infer" title="${esc(d.provenance)}">${d.isReject ? "declined" : esc(d.provenance)}</span>`;
+  // A dedicated class, not v1's "infer": v2 tier words ("reconstructed",
+  // "through-review", "author-verified") run longer than v1's fixed
+  // "inferred" and need to wrap onto their own line instead of clipping.
+  const flag = `<span class="di-flag tier" title="${esc(d.provenance)}">${d.isReject ? "declined" : esc(d.provenance)}</span>`;
   return `<button class="di" data-idx="${i}">
     <span class="di-num">${d.isReject ? "✕" : i + 1}</span>
-    <span class="di-body"><span class="di-title">${esc(d.title)}</span>${flag}</span>
+    <span class="di-body v2"><span class="di-title">${esc(d.title)}</span>${flag}</span>
   </button>`;
 }
 
