@@ -1,5 +1,13 @@
 # Plan: live decision capture — the `/decision-log` emitter
 
+> **Status:** Phase 1 (the honest floor — `observedAt`, the `first-hand` degrade, the
+> `by: human` attestation gate), Phase 2 (the emitter — `generator/decision-log.js`,
+> `skills/decision-log/SKILL.md`, invoked as `/proof:decision-log`), and Phase 3's mechanics
+> (`hooks/observe-edit.js`, `hooks/record-approval.js`, `hooks/reconcile-stop.js`) are **built**.
+> See the Phase 3 note below for exactly what was verified against real Claude Code hook
+> payloads versus wired defensively but unconfirmed. Phase 4 (an instrumented real ticket) is
+> still open.
+
 ## The thesis
 
 `docs/retrofit-ledger.md` names the one thing reconstruction structurally cannot reach:
@@ -163,10 +171,13 @@ observation time. Byte-level fingerprinting stays deferred; it does not block th
 
 ## Scratch state, and what gets committed
 
-`.proof/ledger.jsonl` is committed to the branch, as already decided. The observation log and
-approval state are **not** — they are working files under `.proof/` that the ledger distills
-from, and committing them would put a noisy, merge-conflict-prone artifact in every PR for no
-reader benefit. They are gitignored; only the ledger travels.
+`.proof/ledgers/<ticket>.ledger.jsonl` is committed to the branch, as already decided — one file
+per initiative/PR (`generator/ledger-paths.js`, added when a single repo-wide `.proof/ledger.jsonl`
+turned out to mix every ticket's decisions into one file with no way to scope a walkthrough to
+just the PR it's about). The observation log and approval state are **not** committed — they are
+working files under `.proof/` that the ledger distills from, and committing them would put a
+noisy, merge-conflict-prone artifact in every PR for no reader benefit. They are gitignored; only
+the ledger(s) travel.
 
 ## Phases
 
@@ -182,6 +193,43 @@ produces a real `by: agent` ledger and a walkthrough with no reconstruction in i
 **Phase 3 — the forcing functions.** The three hooks, in the order above. Observation first
 (it improves anchors immediately and is risk-free), then approval, then the Stop gate last,
 since a blocking hook is the one that can go wrong in a way that ruins someone's afternoon.
+
+Built as `hooks/observe-edit.js`, `hooks/record-approval.js`, `hooks/reconcile-stop.js`.
+What's actually verified, versus what is wired on documentation and inference alone:
+
+- **`observe-edit.js` (PostToolUse, `Edit|Write`) — confirmed live.** Wired into a real
+  `.claude/settings.json` and triggered by real `Edit`/`Write` tool calls in this session; the
+  exact stdin field names it depends on (`tool_name`, `tool_input.file_path`/`old_string`/
+  `new_string`/`content`, `tool_response.structuredPatch`) were read from the real payload, not
+  assumed. Both the patch-derived range and the whole-file fallback (a `Write` that creates a
+  file has an empty `structuredPatch`) were exercised.
+- **`reconcile-stop.js` (Stop) — logic verified by direct invocation, blocking mechanism
+  verified by platform documentation, never fired live.** `decision: "block"` + `reason` is
+  what this install's own bundled settings schema documents for a `Stop` hook (not the
+  `continueLoop` field an earlier, less authoritative research pass guessed); this hook was
+  never actually allowed to block a real session, since doing that on purpose has an obvious
+  failure mode. The self-built re-entrancy cap (`MAX_CONSECUTIVE_BLOCKS`, since no confirmed
+  `stop_hook_active`-equivalent field exists in the documented schema) was tested directly:
+  it blocks for a genuinely open decision, then fails open on schedule, on both a fresh ledger
+  and a repeat of the same open set.
+- **`record-approval.js` (PermissionRequest + PostToolUse, `ExitPlanMode`) — pipe-tested only,
+  never fired live.** No real `ExitPlanMode` call happened against the wired hook during this
+  work (that needs an actual plan-approval round trip, not manufactured as a side effect of
+  building this). The script is defensive about that: every field it reads is optional-checked,
+  and any failure exits 0 silently rather than surfacing. **Confirm this one empirically before
+  trusting it** — the file itself says so at the top.
+
+The verified wiring (a real `.claude/settings.json` hooks block pointing at these three
+scripts) is intentionally **not committed** — it hardcoded this session's own scratchpad
+Node binary (this machine's system `node` is broken) and this checkout's absolute path,
+neither of which is portable. What ships is the three hook scripts, which take no path
+assumptions of their own (they resolve sibling `generator/` modules via `__dirname`, and
+read `.proof/` paths from the hook payload's own `cwd`, never `process.cwd()`, since how
+Claude Code sets a spawned hook's working directory isn't confirmed either). Wiring them
+into a real `.claude/settings.json` — with a working `node` and this checkout's real path —
+is left to whoever adopts this, until the portable route (a plugin-declared `hooks.json`
+using `${CLAUDE_PLUGIN_ROOT}`, per external documentation this session did not verify
+first-hand) gets its own verification pass.
 
 **Phase 4 — instrumented for real.** Run one actual ticket end to end and compare its ledger
 against a retrofit of the same PR. The interesting number is not how many decisions each found

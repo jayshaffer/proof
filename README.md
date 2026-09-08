@@ -13,7 +13,10 @@ quality, or suggest improvements.
 - `node` (no `npm install`; the only dependency, EJS, is committed at `generator/vendor/ejs.js`)
 - `gh` authenticated against the target repo (for `proof.sh` and `retrofit.sh` / the retrofit plugin)
 - `jq` (for `proof.sh` and `retrofit.sh`)
-- `claude` CLI with AWS Bedrock access (for live generation; not needed with `--data` or the retrofit path)
+- For live generation (not needed with `--data` or the retrofit path), one of — auto-detected,
+  `aws` preferred when both are present:
+  - `aws` CLI with Bedrock access
+  - `opencode` CLI, authenticated (`opencode auth login`)
 
 ## Usage
 
@@ -31,8 +34,9 @@ to `prototype/pr-<n>.html`, which opens in any browser with no server or build s
 | Flag | Default | Description |
 |---|---|---|
 | `--repo owner/name` | current checkout | Target repository. |
-| `--data file.json` | — | Inject pre-generated walkthrough JSON and skip the model call. Used for prompt tuning and for running the mechanical pipeline without Bedrock credentials. |
-| `--model id` | `us.anthropic.claude-sonnet-4-6[1m]` | Bedrock inference profile. Must be permitted by the assumed IAM role. |
+| `--data file.json` | — | Inject pre-generated walkthrough JSON and skip the model call. Used for prompt tuning and for running the mechanical pipeline without model credentials. |
+| `--backend bedrock\|opencode` | auto-detected (`aws` on PATH → bedrock, else `opencode` on PATH → opencode) | Which CLI/API generates the walkthrough JSON. `bedrock` calls `aws bedrock-runtime invoke-model` directly; `opencode` shells out to the `opencode` CLI. Only needed to override detection. |
+| `--model id` | `us.anthropic.claude-sonnet-4-6[1m]` (bedrock) / opencode's own default | Bedrock: an inference profile, must be permitted by the assumed IAM role. Opencode: a `provider/model` id. |
 | `--prompt file` | `docs/generation-prompt.md` | Generation prompt. |
 | `--out dir` | `prototype` | Output directory. |
 | `--keep-tmp` | off | Retain the temp working directory for inspection. |
@@ -52,7 +56,7 @@ to `prototype/pr-<n>.html`, which opens in any browser with no server or build s
 
 ```
 1. gather    gh pr view / gh pr diff              → title, body, diff, commit SHAs
-2. generate  prompt + inputs → claude (Bedrock)   → walkthrough JSON
+2. generate  prompt + inputs → bedrock | opencode → walkthrough JSON
 3. ingest    node generator/ingest-diff.js        → attribute each diff line to a decision
 4. validate  node validate.js                     → provenance, evidence, coverage checks
 5. render    node generate.js                      → self-contained pr-<n>.html

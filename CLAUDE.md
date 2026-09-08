@@ -58,9 +58,10 @@ trusted) — changing it overrides `docs/design.md`.
 
 ## Pipeline
 
-`proof.sh` runs gather → generate (only model step, Claude on Bedrock) → ingest → validate →
-render. Use `--data file.json` to inject pre-generated JSON and skip the model call (no
-Bedrock creds needed) — the mechanical path for tuning and testing. Individual stages:
+`proof.sh` runs gather → generate (only model step; backend auto-detected from PATH — `aws` →
+bedrock, else `opencode` — override with `--backend bedrock|opencode`) → ingest → validate →
+render. Use `--data file.json` to inject pre-generated JSON and skip the model call (and
+backend detection) entirely — the mechanical path for tuning and testing. Individual stages:
 
 ```sh
 node generator/ingest-diff.js <data.json> <raw.diff> [out.json]
